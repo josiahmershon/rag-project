@@ -2,7 +2,7 @@ import os
 import psycopg2
 
 try:
-    db_password = os.getenv("DB_PASSWORD", "your_super_secret_password")
+    db_password = os.getenv("DB_PASSWORD", "wAyJPNjqvHE7")
     
     conn = psycopg2.connect(
         host="localhost",
