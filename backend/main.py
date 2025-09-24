@@ -7,6 +7,8 @@ from typing import List
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import logging
+from openai import OpenAI
+
 
 # imports settings from settings.py
 from settings import settings
@@ -36,6 +38,14 @@ logger.info("Loading embedding model...")
 embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
 # we'll pad the embeddings to 1536 dimensions to match the database schema
 logger.info("Embedding model loaded successfully")
+
+# initialize vLLM client
+logger.info("Initializing vLLM client...")
+vllm_client = OpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="dummy-key"  # vLLM doesn't require real API key
+)
+logger.info("vLLM client initialized successfully")
 
 def pad_embedding_to_1536(embedding: List[float]) -> List[float]:
     """Pad embedding to 1536 dimensions to match database schema."""
@@ -146,6 +156,54 @@ def get_relevant_chunks(query_embedding: List[float], user_groups: List[str], li
         return []
 
 
+def generate_response_with_vllm(query: str, context_chunks: List[dict]) -> str:
+    """
+    Generate a response using vLLM based on the query and retrieved context chunks.
+    """
+    try:
+        # prepare context from retrieved chunks
+        if not context_chunks:
+            context = "No relevant documents found."
+        else:
+            context = "\n\n".join([f"Source: {chunk['source']}\nContent: {chunk['text']}" for chunk in context_chunks])
+        
+        # create system prompt for RAG
+        system_prompt = """You are a helpful AI assistant that answers questions based on provided context from internal company documents. 
+        
+        Guidelines:
+        - Answer based ONLY on the provided context
+        - If the context doesn't contain enough information, say so
+        - Be concise but informative
+        - Cite sources when relevant
+        - If asked about something not in the context, politely explain that you don't have that information"""
+        
+        # prepare the user message with context
+        user_message = f"""Context from company documents:
+{context}
+
+Question: {query}
+
+Please provide a helpful answer based on the context above."""
+        
+        # make request to vLLM
+        response = vllm_client.chat.completions.create(
+            model="Qwen3/Qwen3-32B-AWQ",  # matches your vLLM setup
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ],
+            temperature=0.7,
+            max_tokens=1000,
+            top_p=0.9
+        )
+        
+        return response.choices[0].message.content
+        
+    except Exception as e:
+        logger.error(f"Error generating response with vLLM: {e}")
+        return f"I apologize, but I encountered an error while generating a response: {str(e)}"
+
+
 @app.get("/health", tags=["System"])
 def health_check():
     """checks if the API is running"""
@@ -171,13 +229,8 @@ def process_query(request: QueryRequest):
         # convert chunks to DocumentSource format
         sources = [DocumentSource(text=chunk["text"], source=chunk["source"]) for chunk in chunks]
         
-        # for now, return a simple response with retrieved context
-        # later this will be replaced with LLM integration
-        if chunks:
-            context = "\n\n".join([chunk["text"] for chunk in chunks])
-            llm_response = f"Based on the retrieved context:\n\n{context}\n\nThis is a placeholder response to: '{request.query}'"
-        else:
-            llm_response = f"No relevant documents found for query: '{request.query}'"
+        # generate response using vLLM
+        llm_response = generate_response_with_vllm(request.query, chunks)
         
         logger.info(f"Returning response with {len(sources)} sources")
         return {"response": llm_response, "sources": sources}
@@ -206,12 +259,8 @@ def process_query_precise(request: QueryRequest):
         # convert chunks to DocumentSource format
         sources = [DocumentSource(text=chunk["text"], source=chunk["source"]) for chunk in chunks]
         
-        # for now, return a simple response with retrieved context
-        if chunks:
-            context = "\n\n".join([chunk["text"] for chunk in chunks])
-            llm_response = f"Based on the most relevant context:\n\n{context}\n\nThis is a precise response to: '{request.query}'"
-        else:
-            llm_response = f"No highly relevant documents found for query: '{request.query}' (similarity threshold: 0.8)"
+        # generate response using vLLM
+        llm_response = generate_response_with_vllm(request.query, chunks)
         
         logger.info(f"Returning precise response with {len(sources)} sources")
         return {"response": llm_response, "sources": sources}
