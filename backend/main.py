@@ -186,8 +186,9 @@ Question: {query}
 Please provide a helpful answer based on the context above."""
         
         # make request to vLLM
+        logger.info(f"Making vLLM request for query: {query[:50]}...")
         response = vllm_client.chat.completions.create(
-            model="Qwen3/Qwen3-32B-AWQ",  # matches your vLLM setup
+            model=settings.vllm_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message}
@@ -196,6 +197,7 @@ Please provide a helpful answer based on the context above."""
             max_tokens=1000,
             top_p=0.9
         )
+        logger.info(f"vLLM response generated successfully")
         
         return response.choices[0].message.content
         
@@ -208,6 +210,20 @@ Please provide a helpful answer based on the context above."""
 def health_check():
     """checks if the API is running"""
     return {"status": "ok"}
+
+@app.get("/health/vllm", tags=["System"])
+def vllm_health_check():
+    """checks if vLLM is accessible"""
+    try:
+        # simple test request to vLLM
+        response = vllm_client.chat.completions.create(
+            model=settings.vllm_model,
+            messages=[{"role": "user", "content": "test"}],
+            max_tokens=1
+        )
+        return {"status": "ok", "vllm": "accessible"}
+    except Exception as e:
+        return {"status": "error", "vllm": "unavailable", "error": str(e)}
 
 
 @app.post("/query", tags=["RAG"], response_model=QueryResponse)
