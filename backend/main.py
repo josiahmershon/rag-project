@@ -7,6 +7,7 @@ from typing import List
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import logging
+import time
 from openai import OpenAI
 
 
@@ -187,6 +188,7 @@ Please provide a helpful answer based on the context above."""
         
         # make request to vLLM
         logger.info(f"Making vLLM request for query: {query[:50]}...")
+        start_time = time.time()
         response = vllm_client.chat.completions.create(
             model=settings.vllm_model,
             messages=[
@@ -197,7 +199,8 @@ Please provide a helpful answer based on the context above."""
             max_tokens=1000,
             top_p=0.9
         )
-        logger.info(f"vLLM response generated successfully")
+        response_time = time.time() - start_time
+        logger.info(f"vLLM response generated in {response_time:.2f}s")
         
         return response.choices[0].message.content
         
