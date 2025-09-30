@@ -8,6 +8,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 import logging
 import time
+import uuid
 from openai import OpenAI
 
 
@@ -187,7 +188,8 @@ Question: {query}
 Please provide a helpful answer based on the context above."""
         
         # make request to vLLM
-        logger.info(f"Making vLLM request for query: {query[:50]}...")
+        request_id = str(uuid.uuid4())[:8]
+        logger.info(f"[{request_id}] Making vLLM request for query: {query[:50]}...")
         start_time = time.time()
         response = vllm_client.chat.completions.create(
             model=settings.vllm_model,
@@ -200,7 +202,7 @@ Please provide a helpful answer based on the context above."""
             top_p=0.9
         )
         response_time = time.time() - start_time
-        logger.info(f"vLLM response generated in {response_time:.2f}s")
+        logger.info(f"[{request_id}] vLLM response generated in {response_time:.2f}s")
         
         return response.choices[0].message.content
         
