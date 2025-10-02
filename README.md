@@ -7,7 +7,7 @@ A comprehensive internal AI system with Retrieval-Augmented Generation (RAG) cap
 - **Backend**: FastAPI API with permission-based document retrieval
 - **Database**: PostgreSQL with pgvector extension for vector similarity search
 - **Embeddings**: BGE (sentence-transformers/all-MiniLM-L6-v2) model for text-to-vector conversion
-- **Future Integration**: Chainlit UI, LangChain orchestration, vLLM for LLM inference
+- **Future Integration**: Chainlit UI, LangChain orchestration
 
 ## Features
 
@@ -15,7 +15,7 @@ A comprehensive internal AI system with Retrieval-Augmented Generation (RAG) cap
 - Vector similarity search with BGE embeddings
 - PostgreSQL connection pooling
 - RESTful API with FastAPI
-- LLM integration (planned)
+- LLM integration
 - Chainlit UI (planned)
 
 ## API Endpoints
@@ -50,7 +50,6 @@ Each document is tagged with user groups for permission-based access.
 
 ## Next Steps
 
-1. Integrate with vLLM for LLM inference
 2. Add Chainlit for conversational UI
 3. Implement LangChain for advanced RAG orchestration
 4. Add document upload and processing capabilities
