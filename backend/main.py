@@ -48,6 +48,38 @@ vllm_client = OpenAI(
 )
 logger.info("vLLM client initialized successfully")
 
+def sanitize_model_output(text: str) -> str:
+    """Remove chain-of-thought blocks and basic unsafe HTML tags from model output.
+
+    - Strips <think> ... </think> blocks entirely
+    - Removes script/style/iframe/object/embed tags if present
+    - Trims excessive surrounding whitespace
+    """
+    try:
+        import re
+
+        if not isinstance(text, str):
+            return ""
+
+        # Remove <think>...</think> blocks (non-greedy, dotall, case-insensitive)
+        text = re.sub(r"<\s*think\b[\s\S]*?>[\s\S]*?<\s*/\s*think\s*>", "", text, flags=re.IGNORECASE)
+        # Also remove lone <think> or </think> tags if any remain
+        text = re.sub(r"<\/?\s*think\s*>", "", text, flags=re.IGNORECASE)
+
+        # Drop dangerous tags entirely (keep inner text out to be safe)
+        for tag in ["script", "style", "iframe", "object", "embed"]:
+            pattern = rf"<\s*{tag}\b[\s\S]*?>[\s\S]*?<\s*/\s*{tag}\s*>"
+            text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+
+        # Basic cleanup of stray HTML tags that might affect rendering
+        # Keep markdown; only remove remaining HTML tags conservatively
+        text = re.sub(r"</?\w+[^>]*>", "", text)
+
+        return text.strip()
+    except Exception:
+        # Fail-closed: return original text rather than crashing request
+        return (text or "").strip()
+
 def pad_embedding_to_1536(embedding: List[float]) -> List[float]:
     """Pad embedding to 1536 dimensions to match database schema."""
     current_dim = len(embedding)
@@ -251,6 +283,7 @@ def process_query(request: QueryRequest):
         
         # generate response using vLLM
         llm_response = generate_response_with_vllm(request.query, chunks)
+        llm_response = sanitize_model_output(llm_response)
         
         logger.info(f"Returning response with {len(sources)} sources")
         return {"response": llm_response, "sources": sources}
@@ -281,6 +314,7 @@ def process_query_precise(request: QueryRequest):
         
         # generate response using vLLM
         llm_response = generate_response_with_vllm(request.query, chunks)
+        llm_response = sanitize_model_output(llm_response)
         
         logger.info(f"Returning precise response with {len(sources)} sources")
         return {"response": llm_response, "sources": sources}

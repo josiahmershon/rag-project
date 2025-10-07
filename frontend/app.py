@@ -5,7 +5,7 @@ import httpx
 
 API_URL = os.getenv("BACKEND_API_URL", "http://localhost:8001")
 DEFAULT_ENDPOINT = os.getenv("BACKEND_ENDPOINT", "/query")
-DEFAULT_USER_GROUPS = os.getenv("DEFAULT_USER_GROUPS", "engineering,executives")
+DEFAULT_USER_GROUPS = os.getenv("DEFAULT_USER_GROUPS", "executives,engineering")
 
 
 def parse_user_groups(groups_str: str):
@@ -48,10 +48,11 @@ async def on_message(message: cl.Message):
     sources = data.get("sources", [])
 
     if sources:
+        # show inline source links only (no content excerpt). The link target
+        # uses the source path as a placeholder; it may not resolve yet.
         sources_text = "\n".join(
             [
-                f"- {s.get('source','unknown')}: "
-                f"{(s.get('text','')[:180] + ('…' if len(s.get('text','')) > 180 else ''))}"
+                f"- [{s.get('source','unknown')}]({s.get('source','unknown')})"
                 for s in sources
             ]
         )
