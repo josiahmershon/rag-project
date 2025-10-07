@@ -1,4 +1,4 @@
-# main.py
+# MAIN.PY
 import psycopg2.pool
 from contextlib import contextmanager
 from fastapi import FastAPI
@@ -10,7 +10,6 @@ import logging
 import time
 import uuid
 from openai import OpenAI
-
 
 # imports settings from settings.py
 from settings import settings
