@@ -11,6 +11,13 @@ import time
 import uuid
 from openai import OpenAI
 
+# LangChain imports
+from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableParallel, RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+from langchain_openai import ChatOpenAI
+
 # imports settings from settings.py
 from settings import settings
 
@@ -48,6 +55,17 @@ vllm_client = OpenAI(
 )
 logger.info("vLLM client initialized successfully")
 
+# initialize LangChain ChatOpenAI client (same vLLM endpoint)
+logger.info("Initializing LangChain ChatOpenAI client...")
+langchain_llm = ChatOpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="dummy-key",
+    model=settings.vllm_model,
+    temperature=0.7,
+    max_tokens=1000
+)
+logger.info("LangChain ChatOpenAI client initialized successfully")
+
 def sanitize_model_output(text: str) -> str:
     """Remove chain-of-thought blocks and basic unsafe HTML tags from model output.
 
@@ -79,6 +97,77 @@ def sanitize_model_output(text: str) -> str:
     except Exception:
         # Fail-closed: return original text rather than crashing request
         return (text or "").strip()
+
+def get_relevant_chunks_langchain(query: str, user_groups: List[str], limit: int = 3, similarity_threshold: float = 0.7) -> List[Document]:
+    """
+    LangChain-compatible retriever that returns Document objects.
+    Uses the same SQL logic as get_relevant_chunks but returns LangChain Documents.
+    """
+    try:
+        # Generate embedding for the query
+        query_embedding = embedding_model.encode(query).tolist()
+        query_embedding = pad_embedding_to_1536(query_embedding)
+        
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            logger.info(f"LangChain: Searching for user with groups: {user_groups}")
+            
+            # Convert embedding to postgresql array format
+            embedding_array = "[" + ",".join(map(str, query_embedding)) + "]"
+            
+            # SQL query with similarity threshold
+            query_sql = """
+            SELECT chunk_text, source_path, 
+                   1 - (embedding <=> %s::vector) as similarity
+            FROM vector_index 
+            WHERE allowed_groups && %s::text[]
+            AND (1 - (embedding <=> %s::vector)) >= %s
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+            """
+            
+            cursor.execute(query_sql, (embedding_array, user_groups, embedding_array, similarity_threshold, embedding_array, limit))
+            results = cursor.fetchall()
+            
+            # Convert to LangChain Documents
+            documents = []
+            for row in results:
+                doc = Document(
+                    page_content=row[0],
+                    metadata={
+                        "source": row[1],
+                        "similarity": float(row[2])
+                    }
+                )
+                documents.append(doc)
+            
+            logger.info(f"LangChain: Retrieved {len(documents)} relevant documents")
+            cursor.close()
+            return documents
+
+    except Exception as e:
+        logger.error(f"LangChain database error: {e}")
+        return []
+
+# LangChain prompt template
+RAG_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are a helpful AI assistant that answers questions based on provided context from internal company documents. 
+
+Guidelines:
+- Answer based ONLY on the provided context
+- If the context doesn't contain enough information, say so
+- Be concise but informative
+- Cite sources when relevant
+- If asked about something not in the context, politely explain that you don't have that information
+- Do not include any internal reasoning or chain-of-thought. Provide only the final answer and brief citations."""),
+    ("user", """Context from company documents:
+{context}
+
+Question: {question}
+
+Please provide a helpful answer based on the context above.""")
+])
 
 def pad_embedding_to_1536(embedding: List[float]) -> List[float]:
     """Pad embedding to 1536 dimensions to match database schema."""
@@ -321,4 +410,60 @@ def process_query_precise(request: QueryRequest):
         
     except Exception as e:
         logger.error(f"Error processing precise query: {e}")
+        return {"response": f"Error processing query: {str(e)}", "sources": []}
+
+
+@app.post("/query-lc", tags=["RAG"], response_model=QueryResponse)
+def process_query_langchain(request: QueryRequest):
+    """
+    LangChain-powered query processing using LCEL (LangChain Expression Language).
+    Uses the same retriever logic but with LangChain's chain composition.
+    """
+    try:
+        logger.info(f"Processing LangChain query: {request.query}")
+        
+        # Retrieve documents using LangChain-compatible retriever
+        documents = get_relevant_chunks_langchain(request.query, request.user_groups, limit=3, similarity_threshold=0.3)
+        
+        if not documents:
+            return {"response": "No relevant documents found for your query.", "sources": []}
+        
+        # Format context from documents
+        context = "\n\n".join([
+            f"Source: {doc.metadata['source']}\nContent: {doc.page_content}" 
+            for doc in documents
+        ])
+        
+        # Create the LangChain chain
+        chain = (
+            RunnableParallel({
+                "context": lambda x: context,
+                "question": RunnablePassthrough()
+            })
+            | RAG_PROMPT
+            | langchain_llm
+            | StrOutputParser()
+        )
+        
+        # Invoke the chain
+        request_id = str(uuid.uuid4())[:8]
+        logger.info(f"[{request_id}] Invoking LangChain chain...")
+        start_time = time.time()
+        
+        response_text = chain.invoke({"question": request.query})
+        
+        response_time = time.time() - start_time
+        logger.info(f"[{request_id}] LangChain response generated in {response_time:.2f}s")
+        
+        # Sanitize the response
+        response_text = sanitize_model_output(response_text)
+        
+        # Convert documents to DocumentSource format
+        sources = [DocumentSource(text=doc.page_content, source=doc.metadata["source"]) for doc in documents]
+        
+        logger.info(f"Returning LangChain response with {len(sources)} sources")
+        return {"response": response_text, "sources": sources}
+        
+    except Exception as e:
+        logger.error(f"Error processing LangChain query: {e}")
         return {"response": f"Error processing query: {str(e)}", "sources": []}
