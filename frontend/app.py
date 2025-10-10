@@ -3,8 +3,8 @@ import chainlit as cl
 import httpx
 
 
-API_URL = os.getenv("BACKEND_API_URL", "http://localhost:8001")
-DEFAULT_ENDPOINT = os.getenv("BACKEND_ENDPOINT", "/query")
+API_URL = os.getenv("BACKEND_API_URL", "http://localhost:8003")
+DEFAULT_ENDPOINT = os.getenv("BACKEND_ENDPOINT", "/query")  # Options: /query, /query-precise, /query-lc
 DEFAULT_USER_GROUPS = os.getenv("DEFAULT_USER_GROUPS", "executives,engineering")
 
 
