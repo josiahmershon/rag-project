@@ -1,7 +1,8 @@
 # MAIN.PY
 import psycopg2.pool
 from contextlib import contextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List
 from sentence_transformers import SentenceTransformer
@@ -9,6 +10,9 @@ import logging
 import time
 import uuid
 from openai import OpenAI
+import tempfile
+import os
+from pathlib import Path
 
 # LangChain imports
 from langchain_core.documents import Document
@@ -491,3 +495,538 @@ def process_query_langchain(request: QueryRequest):
     except Exception as e:
         logger.error(f"Error processing LangChain query: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
+
+
+def parse_document_content(file_path: Path) -> str:
+    """Parse document content based on file extension."""
+    ext = file_path.suffix.lower()
+    
+    if ext == '.txt':
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    elif ext == '.md':
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    elif ext == '.pdf':
+        try:
+            import PyPDF2
+            with open(file_path, 'rb') as f:
+                pdf_reader = PyPDF2.PdfReader(f)
+                text = ""
+                for page in pdf_reader.pages:
+                    text += page.extract_text() + "\n"
+                return text.strip()
+        except ImportError:
+            raise HTTPException(status_code=400, detail="PDF parsing requires PyPDF2. Install with: pip install PyPDF2")
+    elif ext == '.docx':
+        try:
+            from docx import Document as DocxDocument
+            doc = DocxDocument(file_path)
+            text = ""
+            for paragraph in doc.paragraphs:
+                text += paragraph.text + "\n"
+            return text.strip()
+        except ImportError:
+            raise HTTPException(status_code=400, detail="DOCX parsing requires python-docx. Install with: pip install python-docx")
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
+
+
+def chunk_text(text: str, chunk_size: int = 512, overlap: int = 50) -> List[str]:
+    """Simple text chunking."""
+    words = text.split()
+    chunks = []
+    
+    if len(words) <= chunk_size:
+        return [text]
+    
+    start = 0
+    while start < len(words):
+        end = min(start + chunk_size, len(words))
+        chunk_words = words[start:end]
+        chunk_text = ' '.join(chunk_words)
+        
+        if len(chunk_text) >= 100:  # Minimum chunk size
+            chunks.append(chunk_text)
+        
+        start += chunk_size - overlap
+        if start >= len(words):
+            break
+    
+    return chunks
+
+
+@app.post("/upload", tags=["Upload"])
+async def upload_document(
+    file: UploadFile = File(...),
+    department: str = Form(...),
+    allowed_groups: str = Form(...),
+    chunk_size: int = Form(512),
+    chunk_overlap: int = Form(50)
+):
+    """
+    Upload and ingest a document with metadata.
+    """
+    try:
+        # Validate file type
+        allowed_extensions = ['.txt', '.md', '.pdf', '.docx']
+        file_ext = Path(file.filename).suffix.lower()
+        
+        if file_ext not in allowed_extensions:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Unsupported file type. Allowed: {', '.join(allowed_extensions)}"
+            )
+        
+        # Parse allowed groups
+        groups = [g.strip() for g in allowed_groups.split(',') if g.strip()]
+        
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
+            content = await file.read()
+            tmp_file.write(content)
+            tmp_path = Path(tmp_file.name)
+        
+        try:
+            # Parse document content
+            logger.info(f"Parsing document: {file.filename}")
+            doc_content = parse_document_content(tmp_path)
+            
+            if not doc_content.strip():
+                raise HTTPException(status_code=400, detail="Document appears to be empty")
+            
+            # Chunk the document
+            chunks = chunk_text(doc_content, chunk_size, chunk_overlap)
+            logger.info(f"Created {len(chunks)} chunks from {file.filename}")
+            
+            # Process each chunk
+            inserted_chunks = 0
+            for i, chunk_content in enumerate(chunks):
+                try:
+                    # Generate embedding
+                    embedding = embedding_model.encode(chunk_content).tolist()
+                    embedding = pad_embedding_to_1536(embedding)
+                    
+                    # Insert into database
+                    with get_db_connection() as conn:
+                        cursor = conn.cursor()
+                        
+                        cursor.execute("""
+                            INSERT INTO vector_index (
+                                doc_id, source_path, department, 
+                                allowed_groups, last_updated_by, last_updated_at, 
+                                chunk_text, embedding
+                            )
+                            VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s)
+                        """, (
+                            str(uuid.uuid4()),
+                            file.filename,
+                            department,
+                            groups,
+                            "web_upload",
+                            chunk_content,
+                            embedding
+                        ))
+                        
+                        conn.commit()
+                        cursor.close()
+                        inserted_chunks += 1
+                        
+                except Exception as e:
+                    logger.error(f"Failed to insert chunk {i}: {e}")
+                    continue
+            
+            return {
+                "message": f"Successfully uploaded and processed {file.filename}",
+                "filename": file.filename,
+                "chunks_created": len(chunks),
+                "chunks_inserted": inserted_chunks,
+                "department": department,
+                "allowed_groups": groups
+            }
+            
+        finally:
+            # Clean up temporary file
+            if tmp_path.exists():
+                os.unlink(tmp_path)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading document: {e}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@app.get("/database", response_class=HTMLResponse, tags=["Database"])
+def view_documents():
+    """View all documents in the database."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get document summary
+            cursor.execute("""
+                SELECT 
+                    source_path,
+                    department,
+                    allowed_groups,
+                    COUNT(*) as chunk_count,
+                    MAX(last_updated_at) as last_updated
+                FROM vector_index 
+                GROUP BY source_path, department, allowed_groups
+                ORDER BY last_updated DESC
+            """)
+            
+            documents = cursor.fetchall()
+            
+            # Get total stats
+            cursor.execute("SELECT COUNT(*) FROM vector_index")
+            total_chunks = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(DISTINCT source_path) FROM vector_index")
+            total_documents = cursor.fetchone()[0]
+            
+            cursor.close()
+        
+        # Build HTML
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Document Database - RAG System</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }}
+                .header {{ background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+                .stats {{ display: flex; gap: 20px; margin-bottom: 20px; }}
+                .stat-box {{ background-color: #e9ecef; padding: 15px; border-radius: 8px; text-align: center; min-width: 120px; }}
+                .stat-number {{ font-size: 24px; font-weight: bold; color: #007bff; }}
+                .stat-label {{ font-size: 14px; color: #6c757d; }}
+                .documents-table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+                .documents-table th, .documents-table td {{ border: 1px solid #dee2e6; padding: 12px; text-align: left; }}
+                .documents-table th {{ background-color: #f8f9fa; font-weight: bold; }}
+                .documents-table tr:nth-child(even) {{ background-color: #f8f9fa; }}
+                .btn {{ padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; margin: 2px; }}
+                .btn-primary {{ background-color: #007bff; color: white; }}
+                .btn-danger {{ background-color: #dc3545; color: white; }}
+                .btn-secondary {{ background-color: #6c757d; color: white; }}
+                .btn:hover {{ opacity: 0.8; }}
+                .groups {{ font-size: 12px; color: #6c757d; }}
+                .actions {{ white-space: nowrap; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>Document Database</h1>
+                <p>View and manage all documents in the RAG system</p>
+            </div>
+            
+            <div class="stats">
+                <div class="stat-box">
+                    <div class="stat-number">{total_documents}</div>
+                    <div class="stat-label">Documents</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">{total_chunks}</div>
+                    <div class="stat-label">Chunks</div>
+                </div>
+            </div>
+            
+            <div style="margin-bottom: 20px;">
+                <a href="/upload" class="btn btn-primary">📄 Upload New Document</a>
+                <a href="/database" class="btn btn-secondary">🔄 Refresh</a>
+            </div>
+            
+            <table class="documents-table">
+                <thead>
+                    <tr>
+                        <th>Document</th>
+                        <th>Department</th>
+                        <th>Allowed Groups</th>
+                        <th>Chunks</th>
+                        <th>Last Updated</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+        """
+        
+        for doc in documents:
+            source_path, department, allowed_groups, chunk_count, last_updated = doc
+            
+            # Safely format the data
+            safe_source_path = str(source_path).replace("'", "\\'").replace('"', '\\"')
+            safe_department = str(department) if department else "Unknown"
+            
+            # Handle allowed_groups safely
+            if allowed_groups and isinstance(allowed_groups, list):
+                groups_str = ', '.join(str(g) for g in allowed_groups)
+            else:
+                groups_str = "None"
+            
+            # Format date safely
+            if last_updated:
+                try:
+                    date_str = last_updated.strftime('%Y-%m-%d %H:%M')
+                except:
+                    date_str = str(last_updated)
+            else:
+                date_str = "Unknown"
+            
+            html += f"""
+                    <tr>
+                        <td><strong>{safe_source_path}</strong></td>
+                        <td>{safe_department}</td>
+                        <td class="groups">{groups_str}</td>
+                        <td>{chunk_count}</td>
+                        <td>{date_str}</td>
+                        <td class="actions">
+                            <button class="btn btn-primary" onclick="previewDocument('{safe_source_path}')">👁️ Preview</button>
+                            <button class="btn btn-danger" onclick="deleteDocument('{safe_source_path}')">🗑️ Delete</button>
+                        </td>
+                    </tr>
+            """
+        
+        html += """
+                </tbody>
+            </table>
+            
+            <script>
+                function previewDocument(filename) {
+                    fetch(`/docs/preview/${encodeURIComponent(filename)}`)
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.error) {
+                                alert('Error: ' + data.error);
+                            } else {
+                                let content = 'Document: ' + data.filename + '\\n\\n';
+                                content += 'Department: ' + data.department + '\\n';
+                                content += 'Allowed Groups: ' + data.allowed_groups.join(', ') + '\\n';
+                                content += 'Chunks: ' + data.chunks.length + '\\n\\n';
+                                content += 'Content Preview:\\n';
+                                content += data.chunks.slice(0, 2).map((chunk, i) => 
+                                    `Chunk ${i+1}: ${chunk.substring(0, 200)}...`
+                                ).join('\\n\\n');
+                                alert(content);
+                            }
+                        })
+                        .catch(error => {
+                            alert('Error loading preview: ' + error.message);
+                        });
+                }
+                
+                function deleteDocument(filename) {
+                    if (confirm('Are you sure you want to delete all chunks for "' + filename + '"? This cannot be undone.')) {
+                        fetch(`/docs/delete/${encodeURIComponent(filename)}`, { method: 'DELETE' })
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.success) {
+                                    alert('Document deleted successfully!');
+                                    location.reload();
+                                } else {
+                                    alert('Error: ' + data.error);
+                                }
+                            })
+                            .catch(error => {
+                                alert('Error deleting document: ' + error.message);
+                            });
+                    }
+                }
+            </script>
+        </body>
+        </html>
+        """
+        
+        return html
+        
+    except Exception as e:
+        logger.error(f"Error viewing documents: {e}")
+        return f"<h1>Error</h1><p>Failed to load documents: {str(e)}</p>"
+
+
+@app.get("/docs/preview/{filename}", tags=["Database"])
+def preview_document(filename: str):
+    """Preview a document's chunks."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT chunk_text, department, allowed_groups
+                FROM vector_index 
+                WHERE source_path = %s
+                ORDER BY doc_id
+            """, (filename,))
+            
+            results = cursor.fetchall()
+            
+            if not results:
+                return {"error": "Document not found"}
+            
+            chunks = [row[0] for row in results]
+            department = results[0][1]
+            allowed_groups = results[0][2]
+            
+            cursor.close()
+            
+            return {
+                "filename": filename,
+                "department": department,
+                "allowed_groups": allowed_groups,
+                "chunks": chunks
+            }
+            
+    except Exception as e:
+        logger.error(f"Error previewing document: {e}")
+        return {"error": str(e)}
+
+
+@app.delete("/docs/delete/{filename}", tags=["Database"])
+def delete_document(filename: str):
+    """Delete all chunks for a document."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("DELETE FROM vector_index WHERE source_path = %s", (filename,))
+            deleted_count = cursor.rowcount
+            
+            conn.commit()
+            cursor.close()
+            
+            return {
+                "success": True,
+                "message": f"Deleted {deleted_count} chunks for {filename}",
+                "deleted_count": deleted_count
+            }
+            
+    except Exception as e:
+        logger.error(f"Error deleting document: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/upload", response_class=HTMLResponse, tags=["Upload"])
+def upload_form():
+    """Serve the upload form."""
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Document Upload - RAG System</title>
+        <style>
+            body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+            .form-group { margin-bottom: 20px; }
+            label { display: block; margin-bottom: 5px; font-weight: bold; }
+            input, select, textarea { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; }
+            button { background-color: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
+            button:hover { background-color: #0056b3; }
+            .result { margin-top: 20px; padding: 15px; border-radius: 4px; }
+            .success { background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; }
+            .error { background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
+        </style>
+    </head>
+    <body>
+        <h1>Document Upload</h1>
+        <p>Upload documents to add them to the RAG system. Select the appropriate metadata and access controls.</p>
+        
+        <form id="uploadForm" enctype="multipart/form-data">
+            <div class="form-group">
+                <label for="file">Choose Document:</label>
+                <input type="file" id="file" name="file" accept=".txt,.md,.pdf,.docx" required>
+                <small>Supported formats: TXT, MD, PDF, DOCX</small>
+            </div>
+            
+            <div class="form-group">
+                <label for="department">Department:</label>
+                <select id="department" name="department" required>
+                    <option value="">Select Department</option>
+                    <option value="Finance">Finance</option>
+                    <option value="Engineering">Engineering</option>
+                    <option value="Human Resources">Human Resources</option>
+                    <option value="Security">Security</option>
+                    <option value="Product">Product</option>
+                    <option value="Marketing">Marketing</option>
+                    <option value="Sales">Sales</option>
+                    <option value="Operations">Operations</option>
+                    <option value="General">General</option>
+                </select>
+            </div>
+            
+            
+            <div class="form-group">
+                <label for="allowed_groups">Allowed Groups (comma-separated):</label>
+                <input type="text" id="allowed_groups" name="allowed_groups" 
+                       placeholder="e.g., finance,executives,management" required>
+                <small>Examples: finance,executives | engineering,product | hr,employees,management</small>
+            </div>
+            
+            <div class="form-group">
+                <label for="chunk_size">Chunk Size (words):</label>
+                <input type="number" id="chunk_size" name="chunk_size" value="512" min="100" max="2048">
+                <small>Number of words per chunk (100-2048)</small>
+            </div>
+            
+            <div class="form-group">
+                <label for="chunk_overlap">Chunk Overlap (words):</label>
+                <input type="number" id="chunk_overlap" name="chunk_overlap" value="50" min="0" max="200">
+                <small>Overlap between chunks for context preservation</small>
+            </div>
+            
+            <button type="submit">Upload & Ingest Document</button>
+        </form>
+        
+        <div id="result"></div>
+        
+        <script>
+            document.getElementById('uploadForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+                
+                const formData = new FormData();
+                formData.append('file', document.getElementById('file').files[0]);
+                formData.append('department', document.getElementById('department').value);
+                formData.append('allowed_groups', document.getElementById('allowed_groups').value);
+                formData.append('chunk_size', document.getElementById('chunk_size').value);
+                formData.append('chunk_overlap', document.getElementById('chunk_overlap').value);
+                
+                const resultDiv = document.getElementById('result');
+                resultDiv.innerHTML = '<p>Uploading and processing document...</p>';
+                
+                try {
+                    const response = await fetch('/upload', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (response.ok) {
+                        resultDiv.innerHTML = `
+                            <div class="result success">
+                                <h3>Upload Successful!</h3>
+                                <p><strong>File:</strong> ${data.filename}</p>
+                                <p><strong>Chunks Created:</strong> ${data.chunks_created}</p>
+                                <p><strong>Chunks Inserted:</strong> ${data.chunks_inserted}</p>
+                                <p><strong>Department:</strong> ${data.department}</p>
+                                <p><strong>Allowed Groups:</strong> ${data.allowed_groups.join(', ')}</p>
+                            </div>
+                        `;
+                    } else {
+                        resultDiv.innerHTML = `
+                            <div class="result error">
+                                <h3>Upload Failed</h3>
+                                <p>${data.detail}</p>
+                            </div>
+                        `;
+                    }
+                } catch (error) {
+                    resultDiv.innerHTML = `
+                        <div class="result error">
+                            <h3>Upload Error</h3>
+                            <p>${error.message}</p>
+                        </div>
+                    `;
+                }
+            });
+        </script>
+    </body>
+    </html>
+    """
