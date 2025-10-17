@@ -454,7 +454,24 @@ def process_query_langchain(request: QueryRequest):
         documents = get_relevant_chunks_langchain(request.query, request.user_groups, limit=3, similarity_threshold=0.3)
         
         if not documents:
-            return {"response": "No relevant documents found for your query.", "sources": []}
+            # Fallback to a generic assistant answer without context
+            logger.info("No documents found – falling back to general assistant response")
+            try:
+                raw = langchain_llm.invoke(
+                    "You are a helpful AI assistant.\n\nQuestion: "
+                    f"{request.query}\n\nAnswer concisely."
+                )
+                # Extract text if ChatMessage
+                if hasattr(raw, "content"):
+                    raw = raw.content
+                text = str(raw).strip()
+                cleaned = sanitize_model_output(text)
+                if not cleaned:
+                    cleaned = text  # use raw if sanitizer stripped too much
+                return {"response": cleaned, "sources": []}
+            except Exception as e:
+                logger.error(f"Fallback failed: {e}")
+                return {"response": "I'm sorry, I couldn't answer that.", "sources": []}
         
         # Format context from documents
         context = "\n\n".join([

@@ -6,9 +6,8 @@ import httpx
 # Load environment variables from a local .env file if present
 load_dotenv()
 
-# Defaults point to backend on 8001 for smoother local dev
 API_URL = os.getenv("BACKEND_API_URL", "http://localhost:8001")
-DEFAULT_ENDPOINT = os.getenv("BACKEND_ENDPOINT", "/query-lc")  # Options: /query, /query-precise, /query-lc
+DEFAULT_ENDPOINT = os.getenv("BACKEND_ENDPOINT", "/query-lc")
 DEFAULT_USER_GROUPS = os.getenv("DEFAULT_USER_GROUPS", "executives")
 
 
@@ -16,12 +15,23 @@ def parse_user_groups(groups_str: str):
     return [g.strip() for g in groups_str.split(",") if g.strip()]
 
 
+# --- Session helpers -------------------------------------------------
+
+def set_groups(groups):
+    cl.user_session.set("groups", groups)
+
+
+def get_groups():
+    return cl.user_session.get("groups", []) or []
+
+
+# --- Chat lifecycle ---------------------------------------------------
+
 @cl.on_chat_start
 async def start():
     await cl.Message(
         content=(
-            "Connected to backend: "
-            f"{API_URL}{DEFAULT_ENDPOINT}\n\n"
+            f"Connected to backend: {API_URL}{DEFAULT_ENDPOINT}\n\n"
             "Type your question."
         )
     ).send()
@@ -35,7 +45,6 @@ async def on_message(message: cl.Message):
         return
 
     user_groups = parse_user_groups(DEFAULT_USER_GROUPS)
-
     payload = {"query": query, "user_groups": user_groups}
     url = f"{API_URL}{DEFAULT_ENDPOINT}"
 
@@ -52,13 +61,8 @@ async def on_message(message: cl.Message):
     sources = data.get("sources", [])
 
     if sources:
-        # show inline source links only (no content excerpt). The link target
-        # uses the source path as a placeholder; it may not resolve yet.
         sources_text = "\n".join(
-            [
-                f"- [{s.get('source','unknown')}]({s.get('source','unknown')})"
-                for s in sources
-            ]
+            f"- [{s.get('source','unknown')}]({s.get('source','unknown')})" for s in sources
         )
         content = f"{answer}\n\nSources:\n{sources_text}"
     else:
