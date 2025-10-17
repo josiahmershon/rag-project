@@ -9,7 +9,7 @@ load_dotenv()
 # Defaults point to backend on 8001 for smoother local dev
 API_URL = os.getenv("BACKEND_API_URL", "http://localhost:8001")
 DEFAULT_ENDPOINT = os.getenv("BACKEND_ENDPOINT", "/query-lc")  # Options: /query, /query-precise, /query-lc
-DEFAULT_USER_GROUPS = os.getenv("DEFAULT_USER_GROUPS", "executives,engineering")
+DEFAULT_USER_GROUPS = os.getenv("DEFAULT_USER_GROUPS", "executives")
 
 
 def parse_user_groups(groups_str: str):
