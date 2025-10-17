@@ -1,3 +1,26 @@
+Configuration
+=============
+
+The Chainlit app will read a local `.env` file if present. You can customize:
+
+```
+# .env
+BACKEND_API_URL=http://localhost:8001
+BACKEND_ENDPOINT=/query-lc
+DEFAULT_USER_GROUPS=executives,engineering
+```
+
+If `.env` is absent, defaults are used:
+- BACKEND_API_URL: http://localhost:8001
+- BACKEND_ENDPOINT: /query-lc
+- DEFAULT_USER_GROUPS: executives,engineering
+
+Run
+---
+
+```
+chainlit run app.py --host 0.0.0.0 --port 8002 -w
+```
 ## Chainlit Frontend (Minimal)
 
 ### Setup
