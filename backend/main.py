@@ -1,10 +1,9 @@
 # MAIN.PY
 import psycopg2.pool
 from contextlib import contextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List
-import numpy as np
 from sentence_transformers import SentenceTransformer
 import logging
 import time
@@ -40,31 +39,10 @@ class QueryResponse(BaseModel):
     response: str
     sources: List[DocumentSource]
 
-# load embedding model for 1536-dimensional embeddings
-logger.info("Loading embedding model...")
-# using model that generates 1536 dimensions (openai text-embedding-ada-002 compatible)
-embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-# we'll pad the embeddings to 1536 dimensions to match the database schema
-logger.info("Embedding model loaded successfully")
-
-# initialize vLLM client
-logger.info("Initializing vLLM client...")
-vllm_client = OpenAI(
-    base_url="http://localhost:8000/v1",
-    api_key="dummy-key"  # vLLM doesn't require real API key
-)
-logger.info("vLLM client initialized successfully")
-
-# initialize LangChain ChatOpenAI client (same vLLM endpoint)
-logger.info("Initializing LangChain ChatOpenAI client...")
-langchain_llm = ChatOpenAI(
-    base_url="http://localhost:8000/v1",
-    api_key="dummy-key",
-    model=settings.vllm_model,
-    temperature=0.7,
-    max_tokens=1000
-)
-logger.info("LangChain ChatOpenAI client initialized successfully")
+# Globals initialized during FastAPI startup
+embedding_model = None
+vllm_client = None
+langchain_llm = None
 
 def sanitize_model_output(text: str) -> str:
     """Remove chain-of-thought blocks and basic unsafe HTML tags from model output.
@@ -189,16 +167,60 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# create the connection pool when the application starts up
-# this pool will manage all database connections
-db_pool = psycopg2.pool.SimpleConnectionPool(
-    minconn=1,
-    maxconn=20,
-    host=settings.db_host,
-    database=settings.db_name,
-    user=settings.db_user,
-    password=settings.db_password
-)
+# Database connection pool (initialized on startup)
+db_pool = None
+
+@app.on_event("startup")
+def on_startup() -> None:
+    """Initialize heavy resources: embeddings model, DB pool, LLM clients."""
+    global embedding_model, db_pool, vllm_client, langchain_llm
+
+    # Initialize embedding model
+    logger.info("Loading embedding model...")
+    embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+    logger.info("Embedding model loaded successfully")
+
+    # Initialize DB connection pool
+    logger.info("Initializing database connection pool...")
+    db_pool = psycopg2.pool.SimpleConnectionPool(
+        minconn=1,
+        maxconn=20,
+        host=settings.db_host,
+        database=settings.db_name,
+        user=settings.db_user,
+        password=settings.db_password
+    )
+    logger.info("Database connection pool initialized successfully")
+
+    # Initialize vLLM client
+    logger.info("Initializing vLLM client...")
+    vllm_client = OpenAI(
+        base_url=settings.vllm_base_url,
+        api_key="dummy-key"  # vLLM doesn't require real API key
+    )
+    logger.info("vLLM client initialized successfully")
+
+    # Initialize LangChain ChatOpenAI client (same vLLM endpoint)
+    logger.info("Initializing LangChain ChatOpenAI client...")
+    langchain_llm = ChatOpenAI(
+        base_url=settings.vllm_base_url,
+        api_key="dummy-key",
+        model=settings.vllm_model,
+        temperature=0.7,
+        max_tokens=1000
+    )
+    logger.info("LangChain ChatOpenAI client initialized successfully")
+
+@app.on_event("shutdown")
+def on_shutdown() -> None:
+    """Tear down heavy resources cleanly."""
+    global db_pool
+    try:
+        if db_pool is not None:
+            db_pool.closeall()
+            logger.info("Database connection pool closed")
+    except Exception as e:
+        logger.warning(f"Error closing DB pool: {e}")
 
 @contextmanager
 def get_db_connection():
@@ -206,6 +228,8 @@ def get_db_connection():
     a helper function to get a connection from the pool and ensure
     it's returned, even if an error occurs.
     """
+    if db_pool is None:
+        raise RuntimeError("Database connection pool is not initialized")
     conn = db_pool.getconn()
     try:
         yield conn
@@ -227,7 +251,7 @@ def get_relevant_chunks(query_embedding: List[float], user_groups: List[str], li
             embedding_array = "[" + ",".join(map(str, query_embedding)) + "]"
             
             # create user groups filter for permission-based search
-            user_groups_str = "','".join(user_groups)
+            # (groups are passed as array param; no string concat needed)
             
             # first, get all matching documents with similarity scores for debugging
             debug_query = """
@@ -379,7 +403,7 @@ def process_query(request: QueryRequest):
         
     except Exception as e:
         logger.error(f"Error processing query: {e}")
-        return {"response": f"Error processing query: {str(e)}", "sources": []}
+        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
 
 
 @app.post("/query-precise", tags=["RAG"], response_model=QueryResponse)
@@ -410,7 +434,7 @@ def process_query_precise(request: QueryRequest):
         
     except Exception as e:
         logger.error(f"Error processing precise query: {e}")
-        return {"response": f"Error processing query: {str(e)}", "sources": []}
+        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
 
 
 @app.post("/query-lc", tags=["RAG"], response_model=QueryResponse)
@@ -466,4 +490,4 @@ def process_query_langchain(request: QueryRequest):
         
     except Exception as e:
         logger.error(f"Error processing LangChain query: {e}")
-        return {"response": f"Error processing query: {str(e)}", "sources": []}
+        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
