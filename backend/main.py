@@ -1,10 +1,10 @@
 # MAIN.PY
 import psycopg2.pool
 from contextlib import contextmanager
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from typing import List
+from typing import List, Dict, Union
 from sentence_transformers import SentenceTransformer
 import logging
 import time
@@ -13,6 +13,7 @@ from openai import OpenAI
 import tempfile
 import os
 from pathlib import Path
+import re
 
 # LangChain imports
 from langchain_core.documents import Document
@@ -47,6 +48,32 @@ class QueryResponse(BaseModel):
 embedding_model = None
 vllm_client = None
 langchain_llm = None
+
+def validate_query_request(request: QueryRequest) -> None:
+    """Validate query request parameters."""
+    if not request.query or len(request.query.strip()) < 3:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Query must be at least 3 characters"
+        )
+    if len(request.query) > 1000:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Query too long (max 1000 characters)"
+        )
+    if not request.user_groups:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="At least one user group required"
+        )
+
+def validate_upload_file(file: UploadFile) -> None:
+    """Validate uploaded file."""
+    if file.size and file.size > 10 * 1024 * 1024:  # 10MB limit
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, 
+            detail="File too large (max 10MB)"
+        )
 
 def sanitize_model_output(text: str) -> str:
     """Remove chain-of-thought blocks and basic unsafe HTML tags from model output.
@@ -186,14 +213,14 @@ def on_startup() -> None:
 
     # Initialize DB connection pool
     logger.info("Initializing database connection pool...")
-    db_pool = psycopg2.pool.SimpleConnectionPool(
-        minconn=1,
-        maxconn=20,
-        host=settings.db_host,
-        database=settings.db_name,
-        user=settings.db_user,
-        password=settings.db_password
-    )
+db_pool = psycopg2.pool.SimpleConnectionPool(
+    minconn=1,
+    maxconn=20,
+    host=settings.db_host,
+    database=settings.db_name,
+    user=settings.db_user,
+    password=settings.db_password
+)
     logger.info("Database connection pool initialized successfully")
 
     # Initialize vLLM client
@@ -379,21 +406,22 @@ def vllm_health_check():
         return {"status": "error", "vllm": "unavailable", "error": str(e)}
 
 
-@app.post("/query", tags=["RAG"], response_model=QueryResponse)
-def process_query(request: QueryRequest):
+def process_query_common(request: QueryRequest, limit: int = 3, similarity_threshold: float = 0.3) -> QueryResponse:
     """
-    takes user query and user groups, retrieves relevant context,
-    and returns an answer.
+    Common query processing logic used by all query endpoints.
     """
     try:
+        # Validate request
+        validate_query_request(request)
+        
         # embed the user's query using embedding model
         logger.info(f"Processing query: {request.query}")
         query_embedding = embedding_model.encode(request.query).tolist()
         query_embedding = pad_embedding_to_1536(query_embedding)
         logger.info(f"Generated embedding with {len(query_embedding)} dimensions")
 
-        # retrieve relevant chunks from the database with moderate precision
-        chunks = get_relevant_chunks(query_embedding, request.user_groups, limit=3, similarity_threshold=0.3)
+        # retrieve relevant chunks from the database
+        chunks = get_relevant_chunks(query_embedding, request.user_groups, limit=limit, similarity_threshold=similarity_threshold)
         
         # convert chunks to DocumentSource format
         sources = [DocumentSource(text=chunk["text"], source=chunk["source"]) for chunk in chunks]
@@ -405,9 +433,19 @@ def process_query(request: QueryRequest):
         logger.info(f"Returning response with {len(sources)} sources")
         return {"response": llm_response, "sources": sources}
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error processing query: {e}")
         raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
+
+@app.post("/query", tags=["RAG"], response_model=QueryResponse)
+def process_query(request: QueryRequest):
+    """
+    takes user query and user groups, retrieves relevant context,
+    and returns an answer.
+    """
+    return process_query_common(request, limit=3, similarity_threshold=0.3)
 
 
 @app.post("/query-precise", tags=["RAG"], response_model=QueryResponse)
@@ -416,29 +454,7 @@ def process_query_precise(request: QueryRequest):
     takes user query and user groups, retrieves only highly relevant context,
     and returns an answer with stricter similarity filtering.
     """
-    try:
-        # embed the user's query using embedding model
-        logger.info(f"Processing precise query: {request.query}")
-        query_embedding = embedding_model.encode(request.query).tolist()
-        query_embedding = pad_embedding_to_1536(query_embedding)
-        logger.info(f"Generated embedding with {len(query_embedding)} dimensions")
-
-        # retrieve only the most relevant chunks with moderate similarity thresholds    
-        chunks = get_relevant_chunks(query_embedding, request.user_groups, limit=2, similarity_threshold=0.5)
-        
-        # convert chunks to DocumentSource format
-        sources = [DocumentSource(text=chunk["text"], source=chunk["source"]) for chunk in chunks]
-        
-        # generate response using vLLM
-        llm_response = generate_response_with_vllm(request.query, chunks)
-        llm_response = sanitize_model_output(llm_response)
-        
-        logger.info(f"Returning precise response with {len(sources)} sources")
-        return {"response": llm_response, "sources": sources}
-        
-    except Exception as e:
-        logger.error(f"Error processing precise query: {e}")
-        raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
+    return process_query_common(request, limit=2, similarity_threshold=0.5)
 
 
 @app.post("/query-lc", tags=["RAG"], response_model=QueryResponse)
@@ -585,6 +601,9 @@ async def upload_document(
     Upload and ingest a document with metadata.
     """
     try:
+        # Validate file
+        validate_upload_file(file)
+        
         # Validate file type
         allowed_extensions = ['.txt', '.md', '.pdf', '.docx']
         file_ext = Path(file.filename).suffix.lower()
@@ -630,15 +649,16 @@ async def upload_document(
                         
                         cursor.execute("""
                             INSERT INTO vector_index (
-                                doc_id, source_path, department, 
+                                doc_id, source_path, department, security_level,
                                 allowed_groups, last_updated_by, last_updated_at, 
                                 chunk_text, embedding
                             )
-                            VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s)
+                            VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s, %s)
                         """, (
                             str(uuid.uuid4()),
                             file.filename,
                             department,
+                            "Internal",  # Default security_level
                             groups,
                             "web_upload",
                             chunk_content,
