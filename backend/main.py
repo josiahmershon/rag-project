@@ -213,7 +213,8 @@ def on_startup() -> None:
 
     # Initialize DB connection pool
     logger.info("Initializing database connection pool...")
-db_pool = psycopg2.pool.SimpleConnectionPool(
+    global db_pool
+    db_pool = psycopg2.pool.SimpleConnectionPool(
     minconn=1,
     maxconn=20,
     host=settings.db_host,
