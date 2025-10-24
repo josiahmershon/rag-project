@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Optional
 from sentence_transformers import SentenceTransformer
 import logging
 import time
@@ -14,6 +14,7 @@ import tempfile
 import os
 from pathlib import Path
 import re
+import html
 
 # LangChain imports
 from langchain_core.documents import Document
@@ -56,10 +57,10 @@ def validate_query_request(request: QueryRequest) -> None:
             status_code=status.HTTP_400_BAD_REQUEST, 
             detail="Query must be at least 3 characters"
         )
-    if len(request.query) > 1000:
+    if len(request.query) > settings.max_query_length:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
-            detail="Query too long (max 1000 characters)"
+            detail=f"Query too long (max {settings.max_query_length} characters)"
         )
     if not request.user_groups:
         raise HTTPException(
@@ -69,10 +70,10 @@ def validate_query_request(request: QueryRequest) -> None:
 
 def validate_upload_file(file: UploadFile) -> None:
     """Validate uploaded file."""
-    if file.size and file.size > 10 * 1024 * 1024:  # 10MB limit
+    if file.size and file.size > settings.max_file_size:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, 
-            detail="File too large (max 10MB)"
+            detail=f"File too large (max {settings.max_file_size // (1024*1024)}MB)"
         )
 
 def sanitize_model_output(text: str) -> str:
@@ -178,18 +179,8 @@ Question: {question}
 Please provide a helpful answer based on the context above.""")
 ])
 
-def pad_embedding_to_1536(embedding: List[float]) -> List[float]:
-    """Pad embedding to 1536 dimensions to match database schema."""
-    current_dim = len(embedding)
-    if current_dim == 1536:
-        return embedding
-    elif current_dim < 1536:
-        # pad with zeros
-        padding = [0.0] * (1536 - current_dim)
-        return embedding + padding
-    else:
-        # truncate if somehow larger
-        return embedding[:1536]
+# Import utility functions
+from utils import pad_embedding_to_1536
 
 # create the FastAPI application
 app = FastAPI(
@@ -269,7 +260,7 @@ def get_db_connection():
         db_pool.putconn(conn)
 
 
-def get_relevant_chunks(query_embedding: List[float], user_groups: List[str], limit: int = 3, similarity_threshold: float = 0.7) -> List[dict]:
+def get_relevant_chunks(query_embedding: List[float], user_groups: List[str], limit: int = 3, similarity_threshold: float = 0.7) -> List[Dict[str, Union[str, float]]]:
     """
     connects to the database via the pool and retrieves chunks using vector similarity search.
     """
@@ -334,7 +325,7 @@ def get_relevant_chunks(query_embedding: List[float], user_groups: List[str], li
         return []
 
 
-def generate_response_with_vllm(query: str, context_chunks: List[dict]) -> str:
+def generate_response_with_vllm(query: str, context_chunks: List[Dict[str, Union[str, float]]]) -> str:
     """
     Generate a response using vLLM based on the query and retrieved context chunks.
     """
@@ -791,22 +782,22 @@ def view_documents():
         for doc in documents:
             source_path, department, allowed_groups, chunk_count, last_updated = doc
             
-            # Safely format the data
-            safe_source_path = str(source_path).replace("'", "\\'").replace('"', '\\"')
-            safe_department = str(department) if department else "Unknown"
+            # Safely format the data (escape HTML to prevent XSS)
+            safe_source_path = html.escape(str(source_path))
+            safe_department = html.escape(str(department)) if department else "Unknown"
             
-            # Handle allowed_groups safely
+            # Handle allowed_groups safely (escape HTML)
             if allowed_groups and isinstance(allowed_groups, list):
-                groups_str = ', '.join(str(g) for g in allowed_groups)
+                groups_str = html.escape(', '.join(str(g) for g in allowed_groups))
             else:
                 groups_str = "None"
             
-            # Format date safely
+            # Format date safely (escape HTML)
             if last_updated:
                 try:
-                    date_str = last_updated.strftime('%Y-%m-%d %H:%M')
+                    date_str = html.escape(last_updated.strftime('%Y-%m-%d %H:%M'))
                 except:
-                    date_str = str(last_updated)
+                    date_str = html.escape(str(last_updated))
             else:
                 date_str = "Unknown"
             
