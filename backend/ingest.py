@@ -10,6 +10,7 @@ import logging
 from typing import List, Dict
 import json
 from settings import settings
+from utils import pad_embedding_to_1536
 
 # configure logging
 logging.basicConfig(level=logging.INFO)
@@ -19,19 +20,6 @@ logger = logging.getLogger(__name__)
 logger.info("Loading embedding model...")
 embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
 logger.info("Embedding model loaded successfully")
-
-def pad_embedding_to_1536(embedding: List[float]) -> List[float]:
-    """Pad embedding to 1536 dimensions to match database schema."""
-    current_dim = len(embedding)
-    if current_dim == 1536:
-        return embedding
-    elif current_dim < 1536:
-        # pad with zeros
-        padding = [0.0] * (1536 - current_dim)
-        return embedding + padding
-    else:
-        # truncate if somehow larger
-        return embedding[:1536]
 
 # sample documents for testing; updated to match vector_index table structure
 SAMPLE_DOCUMENTS = [

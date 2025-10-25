@@ -2,6 +2,7 @@
 import psycopg2.pool
 from contextlib import contextmanager
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List, Dict, Union, Optional
@@ -187,6 +188,15 @@ app = FastAPI(
     title="AI Assistant API",
     description="API for the AI assistant.",
     version="0.1.0",
+)
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, replace with specific origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Database connection pool (initialized on startup)
