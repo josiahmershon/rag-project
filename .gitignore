@@ -13,6 +13,7 @@ ENV/
 env/
 backend/.venv/
 backend/venv/
+frontend/frontend/
 
 # Environment variables
 .env

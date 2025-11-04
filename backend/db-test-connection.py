@@ -2,7 +2,9 @@ import os
 import psycopg2
 
 try:
-    db_password = os.getenv("DB_PASSWORD", "wAyJPNjqvHE7")
+    db_password = os.getenv("DB_PASSWORD")
+    if not db_password:
+        raise RuntimeError("DB_PASSWORD environment variable is not set")
     
     conn = psycopg2.connect(
         host="localhost",
