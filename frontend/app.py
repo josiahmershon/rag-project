@@ -29,6 +29,7 @@ def get_groups():
 
 @cl.on_chat_start
 async def start():
+    cl.user_session.set("last_turn", None)
     await cl.Message(
         content=(
             f"Connected to backend: {API_URL}{DEFAULT_ENDPOINT}\n\n"
@@ -45,7 +46,24 @@ async def on_message(message: cl.Message):
         return
 
     user_groups = parse_user_groups(DEFAULT_USER_GROUPS)
-    payload = {"query": query, "user_groups": user_groups}
+    last_turn = cl.user_session.get("last_turn") or {}
+
+    previous_user = (last_turn.get("user") or "").strip()
+    previous_answer = (last_turn.get("assistant") or "").strip()
+
+    if previous_user or previous_answer:
+        context_parts = ["Previous exchange:"]
+        if previous_user:
+            context_parts.append(f"User: {previous_user}")
+        if previous_answer:
+            context_parts.append(f"Assistant: {previous_answer}")
+        context_parts.append("")
+        context_parts.append(f"Follow-up question: {query}")
+        effective_query = "\n".join(context_parts)
+    else:
+        effective_query = query
+
+    payload = {"query": effective_query, "user_groups": user_groups}
     url = f"{API_URL}{DEFAULT_ENDPOINT}"
 
     try:
@@ -69,5 +87,7 @@ async def on_message(message: cl.Message):
         content = answer
 
     await cl.Message(content=content).send()
+
+    cl.user_session.set("last_turn", {"user": query, "assistant": answer})
 
 
