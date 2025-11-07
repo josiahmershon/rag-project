@@ -9,7 +9,7 @@ from sentence_transformers import SentenceTransformer
 import logging
 from typing import List, Dict
 import json
-from settings import settings
+from backend.settings import settings
 
 # configure logging
 logging.basicConfig(level=logging.INFO)

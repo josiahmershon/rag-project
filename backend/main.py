@@ -24,7 +24,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 
 # imports settings from settings.py
-from settings import settings
+from backend.settings import settings
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -180,7 +180,7 @@ Please provide a helpful answer based on the context above.""")
 ])
 
 # Import utility functions
-from utils import pad_embedding_to_1536
+from backend.utils import pad_embedding_to_1536
 
 # create the FastAPI application
 app = FastAPI(
