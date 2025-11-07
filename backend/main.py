@@ -718,7 +718,7 @@ def view_documents():
             cursor.close()
         
         # Build HTML
-        html = f"""
+        page_html = f"""
         <!DOCTYPE html>
         <html>
         <head>
@@ -801,7 +801,7 @@ def view_documents():
             else:
                 date_str = "Unknown"
             
-            html += f"""
+            page_html += f"""
                     <tr>
                         <td><strong>{safe_source_path}</strong></td>
                         <td>{safe_department}</td>
@@ -815,7 +815,7 @@ def view_documents():
                     </tr>
             """
         
-        html += """
+        page_html += """
                 </tbody>
             </table>
             
@@ -865,7 +865,7 @@ def view_documents():
         </html>
         """
         
-        return html
+        return page_html
         
     except Exception as e:
         logger.error(f"Error viewing documents: {e}")
