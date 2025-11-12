@@ -17,13 +17,31 @@ Docker notes:
 - Restart services: `docker compose up -d rag-backend rag-frontend`.
 - Logs: `docker compose logs -f rag-backend` or `... rag-frontend`.
 
+## Ingestion Overview
 
-Next steps (notes to self):
-- Sales pilot parsing overhaul:
-  - Build a parser that reads promo tables row-by-row and emits one sentence per product entry.
-  - Capture key fields alongside the chunk (product code, product name, tier, date window, source file, security group).
-  - Write a quick test script against sample promos to verify each chunk looks atomic.
-  - Once happy, re-embed the sales corpus and spot-check retrieval results.
+- Document upload UI (already live)  
+  - Accepts PDFs, DOCX, Markdown, or text files.  
+  - Runs the existing chunk/embedding pipeline.  
+  - Use for manual knowledge drops and non-Oracle sources.
+
+- Oracle promo feed (in progress)  
+  - Oracle team will return pre-summarized rows: one sentence per promo plus metadata.  
+  - We ingest via a lightweight script/CLI (JSON Lines or CSV).  
+  - Script handles validation, embeddings, upserts into `vector_index`.
+
+### Oracle Feed Contract (requested)
+
+- Stable `chunk_id` (promo ID or hash of key columns).  
+- Sentence text (plain UTF-8).  
+- Key fields: product code/name, tier, start/end dates, region, security/security_level.  
+- Source table/view name, snapshot timestamp or run ID.  
+- Optional `last_updated` to support incremental loads.
+
+## Next steps (notes to self):
+- Sales pilot ingestion:
+  - Build the CLI that reads the Oracle sentence feed and writes chunks/metadata.
+  - Store the raw feed alongside each run (checksum + metadata table for audits).
+  - Re-embed the sales corpus and spot-check retrieval results once feed arrives.
 - User group filtering:
   - Map AD distribution lists to simple RAG groups (finance, sales, engineering, legal, etc.).
   - Thread group claims through the frontend (Chainlit) once LDAP sign-in exists.

@@ -23,6 +23,11 @@ from langchain_core.runnables import RunnableParallel, RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 
+try:
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+except ImportError:  # pragma: no cover
+    from langchain_text_splitters import RecursiveCharacterTextSplitter  # type: ignore
+
 # imports settings from settings.py
 from backend.settings import settings
 
@@ -557,27 +562,30 @@ def parse_document_content(file_path: Path) -> str:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
 
 
+def normalize_text(text: str) -> str:
+    """Normalize whitespace and control characters before chunking."""
+
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\xa0", " ")
+    normalized = re.sub(r"[ \t\f]+", " ", normalized)
+    normalized = re.sub(r"\s*\n\s*", "\n", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
 def chunk_text(text: str, chunk_size: int = 512, overlap: int = 50) -> List[str]:
-    """Simple text chunking."""
-    words = text.split()
-    chunks = []
-    
-    if len(words) <= chunk_size:
-        return [text]
-    
-    start = 0
-    while start < len(words):
-        end = min(start + chunk_size, len(words))
-        chunk_words = words[start:end]
-        chunk_text = ' '.join(chunk_words)
-        
-        if len(chunk_text) >= 100:  # Minimum chunk size
-            chunks.append(chunk_text)
-        
-        start += chunk_size - overlap
-        if start >= len(words):
-            break
-    
+    """Chunk text using RecursiveCharacterTextSplitter with smart separators."""
+
+    if not text.strip():
+        return []
+
+    approx_chars_per_word = 5
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=max(chunk_size, 50) * approx_chars_per_word,
+        chunk_overlap=max(overlap, 0) * approx_chars_per_word,
+        separators=["\n\n", "\n", " ", ""],
+    )
+
+    chunks = [segment.strip() for segment in splitter.split_text(text) if segment.strip()]
     return chunks
 
 
@@ -619,52 +627,72 @@ async def upload_document(
             # Parse document content
             logger.info(f"Parsing document: {file.filename}")
             doc_content = parse_document_content(tmp_path)
-            
+            doc_content = normalize_text(doc_content)
+
             if not doc_content.strip():
                 raise HTTPException(status_code=400, detail="Document appears to be empty")
             
             # Chunk the document
             chunks = chunk_text(doc_content, chunk_size, chunk_overlap)
             logger.info(f"Created {len(chunks)} chunks from {file.filename}")
-            
+
+            if chunks:
+                preview = chunks[0]
+                logger.info(
+                    "Sample chunk [1/%s]: %s",
+                    len(chunks),
+                    preview[:200].replace("\n", " ") + ("..." if len(preview) > 200 else ""),
+                )
+
+            if not chunks:
+                raise HTTPException(status_code=400, detail="Failed to produce any text chunks")
+
             # Process each chunk
             inserted_chunks = 0
-            for i, chunk_content in enumerate(chunks):
-                try:
-                    # Generate embedding
-                    embedding = embedding_model.encode(chunk_content).tolist()
-                    embedding = pad_embedding_to_1536(embedding)
-                    
-                    # Insert into database
-                    with get_db_connection() as conn:
-                        cursor = conn.cursor()
-                        
-                        cursor.execute("""
-                            INSERT INTO vector_index (
-                                doc_id, source_path, department, security_level,
-                                allowed_groups, last_updated_by, last_updated_at, 
-                                chunk_text, embedding
+            document_id = str(uuid.uuid4())
+            try:
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    try:
+                        total_chunks = len(chunks)
+                        for i, raw_chunk in enumerate(chunks):
+                            chunk_content = f"[Chunk {i + 1}/{total_chunks}]\n{raw_chunk}"
+
+                            embedding = embedding_model.encode(chunk_content).tolist()
+                            embedding = pad_embedding_to_1536(embedding)
+
+                            cursor.execute(
+                                """
+                                INSERT INTO vector_index (
+                                    doc_id, source_path, department, security_level,
+                                    allowed_groups, last_updated_by, last_updated_at,
+                                    chunk_text, embedding
+                                )
+                                VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s, %s)
+                                """,
+                                (
+                                    document_id,
+                                    file.filename,
+                                    department,
+                                    "Internal",  # Default security_level
+                                    groups,
+                                    "web_upload",
+                                    chunk_content,
+                                    embedding,
+                                ),
                             )
-                            VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s, %s)
-                        """, (
-                            str(uuid.uuid4()),
-                            file.filename,
-                            department,
-                            "Internal",  # Default security_level
-                            groups,
-                            "web_upload",
-                            chunk_content,
-                            embedding
-                        ))
-                        
+                            inserted_chunks += 1
+
                         conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        raise
+                    finally:
                         cursor.close()
-                        inserted_chunks += 1
-                        
-                except Exception as e:
-                    logger.error(f"Failed to insert chunk {i}: {e}")
-                    continue
-            
+            except Exception as e:
+                logger.error(f"Failed to insert chunks for {file.filename}: {e}")
+                raise
+
             return {
                 "message": f"Successfully uploaded and processed {file.filename}",
                 "filename": file.filename,
