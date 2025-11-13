@@ -4,7 +4,7 @@ import csv
 import json
 import logging
 from pathlib import Path
-from typing import Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Sequence
 
 from pydantic import ValidationError
 
@@ -14,6 +14,66 @@ logger = logging.getLogger(__name__)
 
 
 SUPPORTED_EXTENSIONS = {".jsonl", ".ndjson", ".json", ".csv"}
+
+
+def _transform_flat_to_nested(flat_record: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Transform flat JSONL record to nested OracleSentenceRecord structure.
+    
+    Handles:
+    - Flat structure where metadata fields are at top level
+    - Field name mapping: snapshot_run_id -> snapshot_id
+    - Extra fields go into metadata.extra
+    """
+    # Check if already nested (has 'metadata' key)
+    if "metadata" in flat_record and isinstance(flat_record["metadata"], dict):
+        return flat_record
+    
+    # Fields that belong at top level
+    top_level_fields = {"chunk_id", "sentence"}
+    
+    # Metadata fields that are directly mapped
+    metadata_fields = {
+        "source_table",
+        "product_code",
+        "product_name",
+        "promo_tier",
+        "region",
+        "security_level",
+        "tags",
+        "last_updated",
+    }
+    
+    # Build nested structure
+    nested: Dict[str, Any] = {
+        "chunk_id": flat_record.get("chunk_id"),
+        "sentence": flat_record.get("sentence"),
+        "metadata": {},
+    }
+    
+    # Map metadata fields
+    for key in metadata_fields:
+        if key in flat_record:
+            nested["metadata"][key] = flat_record[key]
+    
+    # Map snapshot_run_id to snapshot_id
+    if "snapshot_run_id" in flat_record:
+        nested["metadata"]["snapshot_id"] = flat_record["snapshot_run_id"]
+    
+    # All other fields go into extra (except top-level fields)
+    extra = {}
+    for key, value in flat_record.items():
+        if key not in top_level_fields and key not in metadata_fields and key != "snapshot_run_id":
+            extra[key] = value
+    
+    if extra:
+        nested["metadata"]["extra"] = extra
+    
+    # Ensure source_table is present (required field)
+    if "source_table" not in nested["metadata"]:
+        nested["metadata"]["source_table"] = flat_record.get("source_table", "UNKNOWN")
+    
+    return nested
 
 
 def load_records(path: Path) -> OracleSentenceBatch:
@@ -43,6 +103,8 @@ def _load_json_lines(path: Path) -> Iterable[OracleSentenceRecord]:
                 continue
             try:
                 payload = json.loads(line)
+                # Transform flat structure to nested if needed
+                payload = _transform_flat_to_nested(payload)
                 yield OracleSentenceRecord.model_validate(payload)
             except (json.JSONDecodeError, ValidationError) as exc:
                 logger.error("Invalid JSONL record at line %s in %s: %s", line_number, path, exc)
@@ -63,6 +125,8 @@ def _load_json_array(path: Path) -> Iterable[OracleSentenceRecord]:
 
     for index, entry in enumerate(data, start=1):
         try:
+            # Transform flat structure to nested if needed
+            entry = _transform_flat_to_nested(entry)
             yield OracleSentenceRecord.model_validate(entry)
         except ValidationError as exc:
             logger.error("Invalid record #%s in %s: %s", index, path, exc)
