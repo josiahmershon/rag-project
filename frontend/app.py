@@ -79,9 +79,14 @@ async def on_message(message: cl.Message):
     sources = data.get("sources", [])
 
     if sources:
-        sources_text = "\n".join(
-            f"- [{s.get('source','unknown')}]({s.get('source','unknown')})" for s in sources
-        )
+        sources_lines = []
+        for source in sources:
+            label = source.get("source", "unknown")
+            doc_id = source.get("doc_id")
+            if doc_id and doc_id not in label:
+                label = f"{label} ({doc_id})"
+            sources_lines.append(f"- {label}")
+        sources_text = "\n".join(sources_lines)
         content = f"{answer}\n\nSources:\n{sources_text}"
     else:
         content = answer

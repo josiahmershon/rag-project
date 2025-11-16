@@ -194,6 +194,12 @@ class OracleFeedIngestor:
                         embedding = pad_embedding_to_1536(embedding)
 
                         cursor.execute("DELETE FROM vector_index WHERE doc_id = %s", (record.chunk_id,))
+                        source_label = None
+                        if record.metadata.extra:
+                            source_label = record.metadata.extra.get("source_file")
+                        if not source_label:
+                            source_label = batch.source_file or record.metadata.source_table or "oracle_feed"
+
                         cursor.execute(
                             """
                             INSERT INTO vector_index (
@@ -209,9 +215,9 @@ class OracleFeedIngestor:
                             )
                             VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s, %s)
                             """,
-                            (
+                                (
                                 record.chunk_id,
-                                record.metadata.source_table or batch.source_file or "oracle_feed",
+                                    source_label,
                                 "Sales",
                                 (record.metadata.security_level or "Internal"),
                                 ["sales"],

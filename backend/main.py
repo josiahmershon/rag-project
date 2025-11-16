@@ -44,6 +44,7 @@ class QueryRequest(BaseModel):
 class DocumentSource(BaseModel):
     text: str
     source: str
+    doc_id: Optional[str] = None
 
 # define the structure of the final json response
 class QueryResponse(BaseModel):
@@ -113,7 +114,7 @@ def sanitize_model_output(text: str) -> str:
         # Fail-closed: return original text rather than crashing request
         return (text or "").strip()
 
-def get_relevant_chunks_langchain(query: str, user_groups: List[str], limit: int = 3, similarity_threshold: float = 0.7) -> List[Document]:
+def get_relevant_chunks_langchain(query: str, user_groups: List[str], limit: int = 25, similarity_threshold: float = 0.7) -> List[Document]:
     """
     LangChain-compatible retriever that returns Document objects.
     Uses the same SQL logic as get_relevant_chunks but returns LangChain Documents.
@@ -133,7 +134,7 @@ def get_relevant_chunks_langchain(query: str, user_groups: List[str], limit: int
             
             # SQL query with similarity threshold
             query_sql = """
-            SELECT chunk_text, source_path, 
+            SELECT doc_id, chunk_text, source_path, 
                    1 - (embedding <=> %s::vector) as similarity
             FROM vector_index 
             WHERE allowed_groups && %s::text[]
@@ -142,17 +143,24 @@ def get_relevant_chunks_langchain(query: str, user_groups: List[str], limit: int
             LIMIT %s
             """
             
-            cursor.execute(query_sql, (embedding_array, user_groups, embedding_array, similarity_threshold, embedding_array, limit))
-            results = cursor.fetchall()
+            fetch_limit = min(limit * 3, 100)
+            cursor.execute(query_sql, (embedding_array, user_groups, embedding_array, similarity_threshold, embedding_array, fetch_limit))
+            raw_results = cursor.fetchall()
             
             # Convert to LangChain Documents
             documents = []
-            for row in results:
+            seen_ids = set()
+            for row in raw_results:
+                doc_id = row[0]
+                if doc_id in seen_ids:
+                    continue
+                seen_ids.add(doc_id)
                 doc = Document(
-                    page_content=row[0],
+                    page_content=row[1],
                     metadata={
-                        "source": row[1],
-                        "similarity": float(row[2])
+                        "source": row[2],
+                        "similarity": float(row[3]),
+                        "doc_id": doc_id,
                     }
                 )
                 documents.append(doc)
@@ -171,6 +179,7 @@ RAG_PROMPT = ChatPromptTemplate.from_messages([
 
 Guidelines:
 - Help employees get accurate answers with a friendly professional tone.
+- The context will be provided as a numbered list of documents. Incorporate every relevant document; if multiple records refer to distinct items, mention each one explicitly.
 - Use the provided document context when it is relevant and cite sources.
 - If the context does not answer the question, say so and provide a concise general response if you know it.
 - If you are unsure or lack knowledge, explicitly state that you do not know rather than guessing.
@@ -265,7 +274,7 @@ def get_db_connection():
         db_pool.putconn(conn)
 
 
-def get_relevant_chunks(query_embedding: List[float], user_groups: List[str], limit: int = 3, similarity_threshold: float = 0.7) -> List[Dict[str, Union[str, float]]]:
+def get_relevant_chunks(query_embedding: List[float], user_groups: List[str], limit: int = 25, similarity_threshold: float = 0.7) -> List[Dict[str, Union[str, float]]]:
     """
     connects to the database via the pool and retrieves chunks using vector similarity search.
     """
@@ -283,7 +292,7 @@ def get_relevant_chunks(query_embedding: List[float], user_groups: List[str], li
             
             # first, get all matching documents with similarity scores for debugging
             debug_query = """
-            SELECT chunk_text, source_path, 
+            SELECT doc_id, chunk_text, source_path, 
                    1 - (embedding <=> %s::vector) as similarity
             FROM vector_index 
             WHERE allowed_groups && %s::text[]
@@ -296,11 +305,11 @@ def get_relevant_chunks(query_embedding: List[float], user_groups: List[str], li
             
             logger.info(f"Debug - All matching documents and their similarity scores:")
             for row in debug_results:
-                logger.info(f"  - {row[1]}: {row[2]:.4f}")
+                logger.info(f"  - {row[2]} ({row[0]}): {row[3]:.4f}")
             
             # now apply similarity threshold
             query = """
-            SELECT chunk_text, source_path, 
+            SELECT doc_id, chunk_text, source_path, 
                    1 - (embedding <=> %s::vector) as similarity
             FROM vector_index 
             WHERE allowed_groups && %s::text[]
@@ -309,16 +318,23 @@ def get_relevant_chunks(query_embedding: List[float], user_groups: List[str], li
             LIMIT %s
             """
             
-            cursor.execute(query, (embedding_array, user_groups, embedding_array, similarity_threshold, embedding_array, limit))
-            results = cursor.fetchall()
+            fetch_limit = min(limit * 3, 100)
+            cursor.execute(query, (embedding_array, user_groups, embedding_array, similarity_threshold, embedding_array, fetch_limit))
+            raw_results = cursor.fetchall()
             
             # convert results to chunks
             chunks = []
-            for row in results:
+            seen_ids = set()
+            for row in raw_results:
+                doc_id = row[0]
+                if doc_id in seen_ids:
+                    continue
+                seen_ids.add(doc_id)
                 chunks.append({
-                    "text": row[0],
-                    "source": row[1],
-                    "similarity": float(row[2])
+                    "doc_id": doc_id,
+                    "text": row[1],
+                    "source": row[2],
+                    "similarity": float(row[3])
                 })
             
             logger.info(f"Retrieved {len(chunks)} relevant chunks (similarity >= {similarity_threshold})")
@@ -339,7 +355,13 @@ def generate_response_with_vllm(query: str, context_chunks: List[Dict[str, Union
         if not context_chunks:
             context = "No relevant documents found."
         else:
-            context = "\n\n".join([f"Source: {chunk['source']}\nContent: {chunk['text']}" for chunk in context_chunks])
+            context_entries = []
+            for idx, chunk in enumerate(context_chunks, start=1):
+                doc_id = chunk.get("doc_id", f"doc{idx}")
+                context_entries.append(
+                    f"Document {idx} (doc_id={doc_id}, source={chunk['source']}):\n{chunk['text']}"
+                )
+            context = "\n\n".join(context_entries)
         
         # create system prompt for RAG
         system_prompt = """You are Scoop, the internal AI assistant for Blue Bell Creameries.
@@ -421,7 +443,18 @@ def process_query_common(request: QueryRequest, limit: int = 3, similarity_thres
         chunks = get_relevant_chunks(query_embedding, request.user_groups, limit=limit, similarity_threshold=similarity_threshold)
         
         # convert chunks to DocumentSource format
-        sources = [DocumentSource(text=chunk["text"], source=chunk["source"]) for chunk in chunks]
+        sources = []
+        seen_source_ids = set()
+        for chunk in chunks:
+            doc_id = chunk.get("doc_id")
+            if doc_id and doc_id in seen_source_ids:
+                continue
+            if doc_id:
+                seen_source_ids.add(doc_id)
+            source_label = chunk["source"]
+            if doc_id:
+                source_label = f"{source_label} ({doc_id})"
+            sources.append(DocumentSource(text=chunk["text"], source=source_label, doc_id=doc_id))
         
         # generate response using vLLM
         llm_response = generate_response_with_vllm(request.query, chunks)
@@ -442,7 +475,7 @@ def process_query(request: QueryRequest):
     takes user query and user groups, retrieves relevant context,
     and returns an answer.
     """
-    return process_query_common(request, limit=3, similarity_threshold=0.3)
+    return process_query_common(request, limit=25, similarity_threshold=0.3)
 
 
 @app.post("/query-precise", tags=["RAG"], response_model=QueryResponse)
@@ -451,7 +484,7 @@ def process_query_precise(request: QueryRequest):
     takes user query and user groups, retrieves only highly relevant context,
     and returns an answer with stricter similarity filtering.
     """
-    return process_query_common(request, limit=2, similarity_threshold=0.5)
+    return process_query_common(request, limit=12, similarity_threshold=0.5)
 
 
 @app.post("/query-lc", tags=["RAG"], response_model=QueryResponse)
@@ -464,7 +497,7 @@ def process_query_langchain(request: QueryRequest):
         logger.info(f"Processing LangChain query: {request.query}")
         
         # Retrieve documents using LangChain-compatible retriever
-        documents = get_relevant_chunks_langchain(request.query, request.user_groups, limit=3, similarity_threshold=0.3)
+        documents = get_relevant_chunks_langchain(request.query, request.user_groups, limit=25, similarity_threshold=0.3)
         
         if not documents:
             # Fallback to a generic assistant answer without context
@@ -489,8 +522,8 @@ def process_query_langchain(request: QueryRequest):
         
         # Format context from documents
         context = "\n\n".join([
-            f"Source: {doc.metadata['source']}\nContent: {doc.page_content}" 
-            for doc in documents
+            f"Document {idx} (doc_id={doc.metadata.get('doc_id', f'doc{idx}')}, source={doc.metadata['source']}):\n{doc.page_content}"
+            for idx, doc in enumerate(documents, start=1)
         ])
         
         # Create the LangChain chain
@@ -518,7 +551,18 @@ def process_query_langchain(request: QueryRequest):
         response_text = sanitize_model_output(response_text)
         
         # Convert documents to DocumentSource format
-        sources = [DocumentSource(text=doc.page_content, source=doc.metadata["source"]) for doc in documents]
+        sources = []
+        seen_source_ids = set()
+        for doc in documents:
+            doc_id = doc.metadata.get("doc_id")
+            if doc_id and doc_id in seen_source_ids:
+                continue
+            if doc_id:
+                seen_source_ids.add(doc_id)
+            source_label = doc.metadata["source"]
+            if doc_id:
+                source_label = f"{source_label} ({doc_id})"
+            sources.append(DocumentSource(text=doc.page_content, source=source_label, doc_id=doc_id))
         
         logger.info(f"Returning LangChain response with {len(sources)} sources")
         return {"response": response_text, "sources": sources}
