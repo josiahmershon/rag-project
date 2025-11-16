@@ -6,9 +6,13 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
+import psycopg2
 from pydantic import ValidationError
+from sentence_transformers import SentenceTransformer
 
 from backend.parsers.models import OracleSentenceBatch, OracleSentenceRecord
+from backend.settings import settings
+from backend.utils import pad_embedding_to_1536
 
 logger = logging.getLogger(__name__)
 
@@ -163,8 +167,96 @@ def summarize_batch(batch: OracleSentenceBatch) -> str:
 
 
 class OracleFeedIngestor:
-    """Placeholder ingestion class to be wired into the existing pipeline."""
+    """Ingest Oracle promo feed sentences into the vector store."""
+
+    def __init__(self) -> None:
+        self._embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
     def ingest(self, batch: OracleSentenceBatch) -> None:
-        logger.info("Prepared to ingest %s records (implementation pending).", batch.record_count)
-        # TODO: integrate with embedding model and Postgres writes.
+        if not batch.records:
+            logger.warning("Oracle feed ingest called with empty batch from %s", batch.source_file)
+            return
+
+        logger.info("Ingesting %s promo records from %s", batch.record_count, batch.source_file)
+
+        connection = psycopg2.connect(
+            host=settings.db_host,
+            database=settings.db_name,
+            user=settings.db_user,
+            password=settings.db_password,
+        )
+        try:
+            with connection:
+                with connection.cursor() as cursor:
+                    for record in batch.records:
+                        chunk_text = self._compose_chunk_text(record, batch.source_file)
+                        embedding = self._embedding_model.encode(chunk_text).tolist()
+                        embedding = pad_embedding_to_1536(embedding)
+
+                        cursor.execute("DELETE FROM vector_index WHERE doc_id = %s", (record.chunk_id,))
+                        cursor.execute(
+                            """
+                            INSERT INTO vector_index (
+                                doc_id,
+                                source_path,
+                                department,
+                                security_level,
+                                allowed_groups,
+                                last_updated_by,
+                                last_updated_at,
+                                chunk_text,
+                                embedding
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s, %s)
+                            """,
+                            (
+                                record.chunk_id,
+                                record.metadata.source_table or batch.source_file or "oracle_feed",
+                                "Sales",
+                                (record.metadata.security_level or "Internal"),
+                                ["sales"],
+                                "oracle_feed",
+                                chunk_text,
+                                embedding,
+                            ),
+                        )
+        finally:
+            connection.close()
+
+        logger.info("Completed ingest for %s promo records", batch.record_count)
+
+    @staticmethod
+    def _compose_chunk_text(record: OracleSentenceRecord, source_file: str | None) -> str:
+        """Build a rich chunk body combining the summary sentence and key metadata."""
+        parts: List[str] = [record.sentence]
+
+        meta_lines: List[str] = []
+        metadata = record.metadata
+
+        if metadata.product_name or metadata.product_code:
+            meta_lines.append(
+                f"Product: {metadata.product_name or 'Unknown'}"
+                + (f" (code {metadata.product_code})" if metadata.product_code else "")
+            )
+
+        if metadata.promo_tier:
+            meta_lines.append(f"Promo Tier: {metadata.promo_tier}")
+        if metadata.region:
+            meta_lines.append(f"Region: {metadata.region}")
+        if metadata.tags:
+            meta_lines.append(f"Tags: {', '.join(metadata.tags)}")
+        if metadata.snapshot_id:
+            meta_lines.append(f"Snapshot: {metadata.snapshot_id}")
+        if metadata.last_updated:
+            meta_lines.append(f"Last Updated: {metadata.last_updated.isoformat()}")
+        if source_file:
+            meta_lines.append(f"Source File: {source_file}")
+
+        if metadata.extra:
+            extras = ", ".join(f"{k}={v}" for k, v in metadata.extra.items())
+            meta_lines.append(f"Extra: {extras}")
+
+        if meta_lines:
+            parts.append("Metadata:\n" + "\n".join(meta_lines))
+
+        return "\n\n".join(parts).strip()

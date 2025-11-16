@@ -8,7 +8,7 @@ load_dotenv()
 
 API_URL = os.getenv("BACKEND_API_URL", "http://localhost:8001")
 DEFAULT_ENDPOINT = os.getenv("BACKEND_ENDPOINT", "/query-lc")
-DEFAULT_USER_GROUPS = os.getenv("DEFAULT_USER_GROUPS", "executives")
+DEFAULT_USER_GROUPS = os.getenv("DEFAULT_USER_GROUPS", "sales")
 
 
 def parse_user_groups(groups_str: str):

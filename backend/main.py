@@ -167,15 +167,15 @@ def get_relevant_chunks_langchain(query: str, user_groups: List[str], limit: int
 
 # LangChain prompt template
 RAG_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are a helpful AI assistant that answers questions based on provided context from internal company documents. 
+    ("system", """You are Scoop, the internal AI assistant for Blue Bell Creameries.
 
 Guidelines:
-- Answer based ONLY on the provided context
-- If the context doesn't contain enough information, say so
-- Be concise but informative
-- Cite sources when relevant
-- If asked about something not in the context, politely explain that you don't have that information
-- Do not include any internal reasoning or chain-of-thought. Provide only the final answer and brief citations."""),
+- Help employees get accurate answers with a friendly professional tone.
+- Use the provided document context when it is relevant and cite sources.
+- If the context does not answer the question, say so and provide a concise general response if you know it.
+- If you are unsure or lack knowledge, explicitly state that you do not know rather than guessing.
+- Never fabricate citations or details; avoid hallucinations.
+- Do not reveal internal reasoning or chain-of-thought—share only the final answer and brief citations when used."""),
     ("user", """Context from company documents:
 {context}
 
@@ -342,14 +342,14 @@ def generate_response_with_vllm(query: str, context_chunks: List[Dict[str, Union
             context = "\n\n".join([f"Source: {chunk['source']}\nContent: {chunk['text']}" for chunk in context_chunks])
         
         # create system prompt for RAG
-        system_prompt = """You are a helpful AI assistant that answers questions based on provided context from internal company documents. 
-        
-        Guidelines:
-        - Answer based ONLY on the provided context
-        - If the context doesn't contain enough information, say so
-        - Be concise but informative
-        - Cite sources when relevant
-        - If asked about something not in the context, politely explain that you don't have that information"""
+        system_prompt = """You are Scoop, the internal AI assistant for Blue Bell Creameries.
+
+Guidelines:
+- Help employees with accurate, concise answers in a friendly tone.
+- Prefer the provided context and cite sources when you use it.
+- If the context does not contain the answer, say so and provide a careful general response if you know it.
+- If you are unsure or information is unavailable, admit it rather than guessing.
+- Never fabricate details or citations."""
         
         # prepare the user message with context
         user_message = f"""Context from company documents:
@@ -471,8 +471,9 @@ def process_query_langchain(request: QueryRequest):
             logger.info("No documents found – falling back to general assistant response")
             try:
                 raw = langchain_llm.invoke(
-                    "You are a helpful AI assistant.\n\nQuestion: "
-                    f"{request.query}\n\nAnswer concisely."
+                    "You are Scoop, the internal AI assistant for Blue Bell Creameries.\n\n"
+                    "Provide accurate, concise answers. If you lack information, say so instead of guessing.\n\n"
+                    f"Question: {request.query}\n\nAnswer helpfully."
                 )
                 # Extract text if ChatMessage
                 if hasattr(raw, "content"):
