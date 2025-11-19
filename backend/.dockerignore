@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+backend/.venv/
+backend/venv/
+frontend/.venv/
+
+# Environment variables
+.env
+backend/.env
+frontend/.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+._*
+
+# Model cache (will be downloaded in container)
+models/
+checkpoints/
+
+# Git
+.git/
+.gitignore
+
+# Database files
+*.db
+*.sqlite
+
+# Test files
+test_*.py
+*_test.py
+
+# Scripts (if you don't need them in container)
+backend/scripts/
+
+# Documentation
+*.md
+!README.md

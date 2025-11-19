@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover
 
 # imports settings from settings.py
 from backend.settings import settings
+from backend.utils import normalize_text
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -120,7 +121,6 @@ def get_relevant_chunks_langchain(query: str, user_groups: List[str], limit: int
     Uses the same SQL logic as get_relevant_chunks but returns LangChain Documents.
     """
     try:
-        # Generate embedding for the query
         # Generate embedding for the query
         query_embedding = embedding_model.encode(query).tolist()
         
@@ -437,8 +437,6 @@ def process_query_common(request: QueryRequest, limit: int = 3, similarity_thres
         
         # embed the user's query using embedding model
         logger.info(f"Processing query: {request.query}")
-        # embed the user's query using embedding model
-        logger.info(f"Processing query: {request.query}")
         query_embedding = embedding_model.encode(request.query).tolist()
         logger.info(f"Generated embedding with {len(query_embedding)} dimensions")
 
@@ -608,18 +606,6 @@ def parse_document_content(file_path: Path) -> str:
             raise HTTPException(status_code=400, detail="DOCX parsing requires python-docx. Install with: pip install python-docx")
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}")
-
-
-def normalize_text(text: str) -> str:
-    """Normalize whitespace and control characters before chunking."""
-
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\xa0", " ")
-    normalized = re.sub(r"[ \t\f]+", " ", normalized)
-    normalized = re.sub(r"\s*\n\s*", "\n", normalized)
-    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-    return normalized.strip()
-
-
 def chunk_text(text: str, chunk_size: int = 512, overlap: int = 50) -> List[str]:
     """Chunk text using RecursiveCharacterTextSplitter with smart separators."""
 

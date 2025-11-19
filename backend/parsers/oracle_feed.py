@@ -12,7 +12,6 @@ from sentence_transformers import SentenceTransformer
 
 from backend.parsers.models import OracleSentenceBatch, OracleSentenceRecord
 from backend.settings import settings
-from backend.settings import settings
 
 logger = logging.getLogger(__name__)
 
