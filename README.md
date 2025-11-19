@@ -19,15 +19,15 @@ Docker notes:
 
 ## Ingestion Overview
 
-- Document upload UI (already live)  
+- Document upload UI (Live)  
   - Accepts PDFs, DOCX, Markdown, or text files.  
   - Runs the existing chunk/embedding pipeline.  
   - Use for manual knowledge drops and non-Oracle sources.
 
-- Oracle promo feed (in progress)  
-  - Oracle team will return pre-summarized rows: one sentence per promo plus metadata.  
-  - We ingest via a lightweight script/CLI (JSON Lines or CSV).  
-  - Script handles validation, embeddings, upserts into `vector_index`.
+- Oracle promo feed (Implemented)  
+  - CLI tool `ingest_oracle_feed.py` is ready.
+  - Parses JSONL/CSV exports from Oracle.
+  - Handles metadata extraction and vector upserts.
 
 ### Oracle Feed Contract (requested)
 
@@ -37,16 +37,19 @@ Docker notes:
 - Source table/view name, snapshot timestamp or run ID.  
 - Optional `last_updated` to support incremental loads.
 
-## Next steps (notes to self):
-- Sales pilot ingestion:
-  - Build the CLI that reads the Oracle sentence feed and writes chunks/metadata.
-  - Store the raw feed alongside each run (checksum + metadata table for audits).
-  - Re-embed the sales corpus and spot-check retrieval results once feed arrives.
-- User group filtering:
-  - Map AD distribution lists to simple RAG groups (finance, sales, engineering, legal, etc.).
-  - Thread group claims through the frontend (Chainlit) once LDAP sign-in exists.
-  - Apply list-based filters in SQL before similarity search so the LLM sees less noise.
-- General polish:
-  - Add chunk IDs + timestamps to the vector table for debugging.
-  - Keep an eye on ingestion performance; consider batching inserts and async uploads later.
-  - Log retrieval hits/misses so I can tune chunking rules.
+## Roadmap & Future Ideas
+
+### Immediate Priorities (Stability)
+- **Fix Blocking I/O**: The current `upload_document` endpoint blocks the server. Need to switch to `asyncpg` or run DB calls in a thread pool.
+- **Authentication**: Add proper user authentication (OAuth2/OIDC) instead of relying on client-provided groups.
+- **Secrets Management**: Move all credentials to environment variables and remove defaults from code.
+
+### Medium Term (Enhancements)
+- **Hybrid Search**: Implement keyword search (BM25) alongside vector search for better precision on specific terms.
+- **Reranking**: Add a cross-encoder reranking step to improve result relevance.
+- **Chat History**: Persist user conversations in the database.
+
+### Completed / In Progress
+- [x] Sales pilot ingestion (CLI implemented)
+- [x] User group filtering (SQL implementation active)
+- [ ] General polish (Logging needs improvement)
