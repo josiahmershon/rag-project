@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     db_password: str
     vllm_base_url: str = "http://localhost:8000/v1"
     vllm_model: str = "Qwen/Qwen3-32B-AWQ"
+    embedding_model_name: str = "sentence-transformers/all-mpnet-base-v2"
     
     # File upload configuration
     max_file_size: int = 10 * 1024 * 1024  # 10MB

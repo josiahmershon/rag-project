@@ -12,7 +12,7 @@ from sentence_transformers import SentenceTransformer
 
 from backend.parsers.models import OracleSentenceBatch, OracleSentenceRecord
 from backend.settings import settings
-from backend.utils import pad_embedding_to_1536
+from backend.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +170,7 @@ class OracleFeedIngestor:
     """Ingest Oracle promo feed sentences into the vector store."""
 
     def __init__(self) -> None:
-        self._embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        self._embedding_model = SentenceTransformer(settings.embedding_model_name)
 
     def ingest(self, batch: OracleSentenceBatch) -> None:
         if not batch.records:
@@ -191,7 +191,6 @@ class OracleFeedIngestor:
                     for record in batch.records:
                         chunk_text = self._compose_chunk_text(record, batch.source_file)
                         embedding = self._embedding_model.encode(chunk_text).tolist()
-                        embedding = pad_embedding_to_1536(embedding)
 
                         cursor.execute("DELETE FROM vector_index WHERE doc_id = %s", (record.chunk_id,))
                         source_label = None

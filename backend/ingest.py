@@ -17,21 +17,13 @@ logger = logging.getLogger(__name__)
 
 # load embedding model
 logger.info("Loading embedding model...")
-embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+# load embedding model
+logger.info("Loading embedding model...")
+embedding_model = SentenceTransformer(settings.embedding_model_name)
+logger.info("Embedding model loaded successfully")
 logger.info("Embedding model loaded successfully")
 
-def pad_embedding_to_1536(embedding: List[float]) -> List[float]:
-    """Pad embedding to 1536 dimensions to match database schema."""
-    current_dim = len(embedding)
-    if current_dim == 1536:
-        return embedding
-    elif current_dim < 1536:
-        # pad with zeros
-        padding = [0.0] * (1536 - current_dim)
-        return embedding + padding
-    else:
-        # truncate if somehow larger
-        return embedding[:1536]
+
 
 # sample documents for testing; updated to match vector_index table structure
 SAMPLE_DOCUMENTS = [
@@ -158,8 +150,8 @@ def ingest_documents(documents: List[Dict]):
             logger.info(f"Processing document {i+1}/{len(documents)}: {doc['source_path']}")
             
             # generate embedding and pad to 1536 dimensions
+            # generate embedding and pad to 1536 dimensions
             embedding = embedding_model.encode(doc['chunk_text']).tolist()
-            embedding = pad_embedding_to_1536(embedding)
             
             # insert into existing vector_index table
             cursor.execute("""

@@ -121,8 +121,8 @@ def get_relevant_chunks_langchain(query: str, user_groups: List[str], limit: int
     """
     try:
         # Generate embedding for the query
+        # Generate embedding for the query
         query_embedding = embedding_model.encode(query).tolist()
-        query_embedding = pad_embedding_to_1536(query_embedding)
         
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -194,7 +194,8 @@ Please provide a helpful answer based on the context above.""")
 ])
 
 # Import utility functions
-from backend.utils import pad_embedding_to_1536
+# Import utility functions
+from backend.utils import normalize_text
 
 # create the FastAPI application
 app = FastAPI(
@@ -212,8 +213,9 @@ def on_startup() -> None:
     global embedding_model, db_pool, vllm_client, langchain_llm
 
     # Initialize embedding model
+    # Initialize embedding model
     logger.info("Loading embedding model...")
-    embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+    embedding_model = SentenceTransformer(settings.embedding_model_name)
     logger.info("Embedding model loaded successfully")
 
     # Initialize DB connection pool
@@ -435,8 +437,9 @@ def process_query_common(request: QueryRequest, limit: int = 3, similarity_thres
         
         # embed the user's query using embedding model
         logger.info(f"Processing query: {request.query}")
+        # embed the user's query using embedding model
+        logger.info(f"Processing query: {request.query}")
         query_embedding = embedding_model.encode(request.query).tolist()
-        query_embedding = pad_embedding_to_1536(query_embedding)
         logger.info(f"Generated embedding with {len(query_embedding)} dimensions")
 
         # retrieve relevant chunks from the database
@@ -704,7 +707,6 @@ async def upload_document(
                             chunk_content = f"[Chunk {i + 1}/{total_chunks}]\n{raw_chunk}"
 
                             embedding = embedding_model.encode(chunk_content).tolist()
-                            embedding = pad_embedding_to_1536(embedding)
 
                             cursor.execute(
                                 """
