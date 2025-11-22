@@ -2,7 +2,7 @@
 Utility functions for the RAG system.
 """
 
-from typing import List
+from typing import Any, Iterable, List
 import re
 
 
@@ -25,3 +25,18 @@ def normalize_text(text: str) -> str:
     normalized = re.sub(r"\s*\n\s*", "\n", normalized)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized)
     return normalized.strip()
+
+
+def vector_to_list(vector: Any) -> List[float]:
+    """
+    Convert embedding model outputs into a plain Python list of floats.
+    Supports numpy arrays, torch tensors, and generic iterables.
+    """
+
+    if hasattr(vector, "tolist"):
+        return list(vector.tolist())  # type: ignore[arg-type]
+    if isinstance(vector, list):
+        return vector
+    if isinstance(vector, Iterable):
+        return [float(value) for value in vector]
+    raise TypeError(f"Unsupported vector type: {type(vector)!r}")

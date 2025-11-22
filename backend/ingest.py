@@ -4,23 +4,20 @@ data ingestion script for the RAG system.
 loads sample documents, generates embeddings, and stores them in PostgreSQL.
 """
 
+import json
+from typing import Dict, List
+
 import psycopg2
 from sentence_transformers import SentenceTransformer
-import logging
-from typing import List, Dict
-import json
+
+from backend.logging_config import get_logger
 from backend.settings import settings
 
-# configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
-# load embedding model
-logger.info("Loading embedding model...")
 # load embedding model
 logger.info("Loading embedding model...")
 embedding_model = SentenceTransformer(settings.embedding_model_name)
-logger.info("Embedding model loaded successfully")
 logger.info("Embedding model loaded successfully")
 
 
@@ -90,7 +87,7 @@ def setup_existing_table():
             host=settings.db_host,
             database=settings.db_name,
             user=settings.db_user,
-            password=settings.db_password
+            password=settings.db_password.get_secret_value(),
         )
         cursor = conn.cursor()
         
@@ -138,7 +135,7 @@ def ingest_documents(documents: List[Dict]):
             host=settings.db_host,
             database=settings.db_name,
             user=settings.db_user,
-            password=settings.db_password
+            password=settings.db_password.get_secret_value(),
         )
         cursor = conn.cursor()
         
@@ -188,7 +185,7 @@ def verify_ingestion():
             host=settings.db_host,
             database=settings.db_name,
             user=settings.db_user,
-            password=settings.db_password
+            password=settings.db_password.get_secret_value(),
         )
         cursor = conn.cursor()
         

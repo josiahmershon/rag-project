@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import json
-import logging
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
@@ -10,10 +9,12 @@ import psycopg2
 from pydantic import ValidationError
 from sentence_transformers import SentenceTransformer
 
+from backend.logging_config import get_logger
 from backend.parsers.models import OracleSentenceBatch, OracleSentenceRecord
 from backend.settings import settings
+from backend.utils import vector_to_list
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 SUPPORTED_EXTENSIONS = {".jsonl", ".ndjson", ".json", ".csv"}
@@ -182,14 +183,14 @@ class OracleFeedIngestor:
             host=settings.db_host,
             database=settings.db_name,
             user=settings.db_user,
-            password=settings.db_password,
+            password=settings.db_password.get_secret_value(),
         )
         try:
             with connection:
                 with connection.cursor() as cursor:
                     for record in batch.records:
                         chunk_text = self._compose_chunk_text(record, batch.source_file)
-                        embedding = self._embedding_model.encode(chunk_text).tolist()
+                        embedding = vector_to_list(self._embedding_model.encode(chunk_text))
 
                         cursor.execute("DELETE FROM vector_index WHERE doc_id = %s", (record.chunk_id,))
                         source_label = None

@@ -3,12 +3,13 @@
 Test script to verify the vLLM integration with the RAG system.
 """
 
-import requests
 import json
-import logging
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+import requests
+
+from backend.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 def test_vllm_integration():
     """Test the integrated RAG + vLLM system."""

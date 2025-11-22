@@ -2,6 +2,7 @@ import psycopg2
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from backend.settings import settings
+from backend.utils import vector_to_list
 
 def verify():
     print("Verifying migration...")
@@ -11,7 +12,7 @@ def verify():
         host=settings.db_host,
         database=settings.db_name,
         user=settings.db_user,
-        password=settings.db_password
+        password=settings.db_password.get_secret_value(),
     )
     cursor = conn.cursor()
     
@@ -40,7 +41,7 @@ def verify():
     # 3. Test Vector Search
     model = SentenceTransformer(settings.embedding_model_name)
     query = "revenue growth"
-    embedding = model.encode(query).tolist()
+    embedding = vector_to_list(model.encode(query))
     
     # Simple cosine similarity search
     cursor.execute("""

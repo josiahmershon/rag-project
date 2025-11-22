@@ -1,20 +1,22 @@
 # MAIN.PY
-import psycopg2.pool
-from contextlib import contextmanager
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, status
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
-from typing import List, Dict, Union, Optional
-from sentence_transformers import SentenceTransformer
-import logging
+import html
+import os
+import re
+import tempfile
 import time
 import uuid
-from openai import OpenAI
-import tempfile
-import os
+from contextlib import contextmanager
 from pathlib import Path
-import re
-import html
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional, Union
+
+import psycopg2.pool
+from fastapi import File, Form, HTTPException, UploadFile, status
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+from openai import OpenAI
+from pydantic import BaseModel
+from sentence_transformers import SentenceTransformer
 
 # LangChain imports
 from langchain_core.documents import Document
@@ -29,12 +31,11 @@ except ImportError:  # pragma: no cover
     from langchain_text_splitters import RecursiveCharacterTextSplitter  # type: ignore
 
 # imports settings from settings.py
+from backend.logging_config import get_logger
 from backend.settings import settings
-from backend.utils import normalize_text
+from backend.utils import normalize_text, vector_to_list
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # define the structure of the incoming request json
 class QueryRequest(BaseModel):
@@ -57,6 +58,14 @@ embedding_model = None
 vllm_client = None
 langchain_llm = None
 
+_TEST_STUB_CHUNKS: List[Dict[str, Union[str, float]]] = [
+    {
+        "doc_id": "stub-doc-1",
+        "text": "This is a stubbed chunk used during automated tests.",
+        "source": "stub_document.md",
+        "similarity": 0.99,
+    }
+]
 def validate_query_request(request: QueryRequest) -> None:
     """Validate query request parameters."""
     if not request.query or len(request.query.strip()) < 3:
@@ -120,9 +129,23 @@ def get_relevant_chunks_langchain(query: str, user_groups: List[str], limit: int
     LangChain-compatible retriever that returns Document objects.
     Uses the same SQL logic as get_relevant_chunks but returns LangChain Documents.
     """
+    if settings.test_mode:
+        logger.debug("Test mode active; returning stubbed LangChain documents")
+        return [
+            Document(
+                page_content=chunk["text"],
+                metadata={
+                    "source": chunk["source"],
+                    "similarity": chunk["similarity"],
+                    "doc_id": chunk["doc_id"],
+                },
+            )
+            for chunk in _TEST_STUB_CHUNKS[: min(limit, len(_TEST_STUB_CHUNKS))]
+        ]
+
     try:
         # Generate embedding for the query
-        query_embedding = embedding_model.encode(query).tolist()
+        query_embedding = vector_to_list(embedding_model.encode(query))
         
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -193,8 +216,6 @@ Question: {question}
 Please provide a helpful answer based on the context above.""")
 ])
 
-# Import utility functions
-# Import utility functions
 from backend.utils import normalize_text
 
 # create the FastAPI application
@@ -211,42 +232,75 @@ db_pool = None
 def on_startup() -> None:
     """Initialize heavy resources: embeddings model, DB pool, LLM clients."""
     global embedding_model, db_pool, vllm_client, langchain_llm
+    if settings.test_mode:
+        logger.info("Test mode detected; installing lightweight stubs")
 
-    # Initialize embedding model
-    # Initialize embedding model
+        # Minimal embedding model for deterministic behaviour in tests
+        class _StubEmbeddingModel:
+            def encode(self, value: Union[str, List[str]]) -> List[float]:
+                if isinstance(value, list):
+                    return [float(len(" ".join(value)) or 1.0)]
+                if not isinstance(value, str):
+                    return [0.0]
+                return [float(len(value) or 1.0)]
+
+        embedding_model = _StubEmbeddingModel()
+
+        def _stub_completion_create(*args, **kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="Stub response generated during test mode."
+                        )
+                    )
+                ]
+            )
+
+        vllm_client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(create=_stub_completion_create)
+            )
+        )
+        langchain_llm = SimpleNamespace(
+            invoke=lambda *args, **kwargs: "Stub response generated during test mode."
+        )
+        db_pool = None
+        return
+
     logger.info("Loading embedding model...")
     embedding_model = SentenceTransformer(settings.embedding_model_name)
     logger.info("Embedding model loaded successfully")
 
-    # Initialize DB connection pool
     logger.info("Initializing database connection pool...")
-    global db_pool
     db_pool = psycopg2.pool.SimpleConnectionPool(
-    minconn=1,
-    maxconn=20,
-    host=settings.db_host,
-    database=settings.db_name,
-    user=settings.db_user,
-    password=settings.db_password
-)
+        minconn=1,
+        maxconn=20,
+        host=settings.db_host,
+        database=settings.db_name,
+        user=settings.db_user,
+        password=settings.db_password.get_secret_value(),
+    )
     logger.info("Database connection pool initialized successfully")
 
-    # Initialize vLLM client
     logger.info("Initializing vLLM client...")
     vllm_client = OpenAI(
         base_url=settings.vllm_base_url,
-        api_key="dummy-key"  # vLLM doesn't require real API key
+        api_key=settings.vllm_api_key.get_secret_value()
+        if settings.vllm_api_key
+        else "dummy-key",
     )
     logger.info("vLLM client initialized successfully")
 
-    # Initialize LangChain ChatOpenAI client (same vLLM endpoint)
     logger.info("Initializing LangChain ChatOpenAI client...")
     langchain_llm = ChatOpenAI(
         base_url=settings.vllm_base_url,
-        api_key="dummy-key",
+        api_key=settings.vllm_api_key.get_secret_value()
+        if settings.vllm_api_key
+        else "dummy-key",
         model=settings.vllm_model,
         temperature=0.7,
-        max_tokens=1000
+        max_tokens=1000,
     )
     logger.info("LangChain ChatOpenAI client initialized successfully")
 
@@ -280,6 +334,10 @@ def get_relevant_chunks(query_embedding: List[float], user_groups: List[str], li
     """
     connects to the database via the pool and retrieves chunks using vector similarity search.
     """
+    if settings.test_mode:
+        logger.debug("Test mode active; returning stubbed chunk results")
+        return _TEST_STUB_CHUNKS[: min(limit, len(_TEST_STUB_CHUNKS))]
+
     try:
         with get_db_connection() as conn:  # borrows a connection from the pool
             cursor = conn.cursor()
@@ -352,6 +410,9 @@ def generate_response_with_vllm(query: str, context_chunks: List[Dict[str, Union
     """
     Generate a response using vLLM based on the query and retrieved context chunks.
     """
+    if settings.test_mode:
+        return "Stub response generated during test mode."
+
     try:
         # prepare context from retrieved chunks
         if not context_chunks:
@@ -415,6 +476,8 @@ def health_check():
 @app.get("/health/vllm", tags=["System"])
 def vllm_health_check():
     """checks if vLLM is accessible"""
+    if settings.test_mode:
+        return {"status": "ok", "vllm": "stub"}
     try:
         # simple test request to vLLM
         response = vllm_client.chat.completions.create(
@@ -437,7 +500,7 @@ def process_query_common(request: QueryRequest, limit: int = 3, similarity_thres
         
         # embed the user's query using embedding model
         logger.info(f"Processing query: {request.query}")
-        query_embedding = embedding_model.encode(request.query).tolist()
+        query_embedding = vector_to_list(embedding_model.encode(request.query))
         logger.info(f"Generated embedding with {len(query_embedding)} dimensions")
 
         # retrieve relevant chunks from the database
@@ -494,6 +557,21 @@ def process_query_langchain(request: QueryRequest):
     LangChain-powered query processing using LCEL (LangChain Expression Language).
     Uses the same retriever logic but with LangChain's chain composition.
     """
+    if settings.test_mode:
+        logger.info("Test mode: returning stub LangChain response")
+        sources = [
+            DocumentSource(
+                text=chunk["text"],
+                source=f"{chunk['source']} ({chunk['doc_id']})",
+                doc_id=chunk["doc_id"],
+            )
+            for chunk in _TEST_STUB_CHUNKS
+        ]
+        return {
+            "response": "Stub LangChain response generated during test mode.",
+            "sources": sources,
+        }
+
     try:
         logger.info(f"Processing LangChain query: {request.query}")
         
@@ -692,7 +770,7 @@ async def upload_document(
                         for i, raw_chunk in enumerate(chunks):
                             chunk_content = f"[Chunk {i + 1}/{total_chunks}]\n{raw_chunk}"
 
-                            embedding = embedding_model.encode(chunk_content).tolist()
+                            embedding = vector_to_list(embedding_model.encode(chunk_content))
 
                             cursor.execute(
                                 """

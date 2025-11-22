@@ -4,20 +4,20 @@ Script to re-embed all documents in the vector_index table using the new model.
 This handles the migration from 1536 dimensions (padded) to 768 dimensions (native).
 """
 
-import logging
-import psycopg2
-from sentence_transformers import SentenceTransformer
-from dotenv import load_dotenv
 import os
+
+import psycopg2
+from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
 
 # Load environment variables from .env file
 load_dotenv()
 
+from backend.logging_config import get_logger
 from backend.settings import settings
+from backend.utils import vector_to_list
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 def reembed_data():
     logger.info("Starting re-embedding process...")
@@ -30,7 +30,7 @@ def reembed_data():
         host=settings.db_host,
         database=settings.db_name,
         user=settings.db_user,
-        password=settings.db_password
+        password=settings.db_password.get_secret_value(),
     )
     
     try:
@@ -72,7 +72,7 @@ def reembed_data():
             doc_id, source_path, department, security_level, allowed_groups, last_updated_by, last_updated_at, chunk_text = row
             
             # Generate new embedding
-            embedding = model.encode(chunk_text).tolist()
+            embedding = vector_to_list(model.encode(chunk_text))
             
             cursor.execute("""
                 INSERT INTO vector_index_new (
