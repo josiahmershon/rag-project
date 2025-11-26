@@ -1,12 +1,14 @@
 # MAIN.PY
 import base64
 import html
+import math
 import os
 import re
 import tempfile
 import time
 import uuid
 from contextlib import contextmanager
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
@@ -558,7 +560,15 @@ def process_query_common(request: QueryRequest, limit: int = 3, similarity_thres
 
         # retrieve relevant chunks from the database
         chunks = get_relevant_chunks(query_embedding, request.user_groups, limit=limit, similarity_threshold=similarity_threshold)
-        
+
+        attachment_chunks = build_ephemeral_attachment_chunks(query_embedding, request.attachments)
+        if attachment_chunks:
+            logger.info(
+                "Including %s transient chunk(s) from attachments",
+                len(attachment_chunks),
+            )
+            chunks = attachment_chunks + chunks
+
         # convert chunks to DocumentSource format
         sources = []
         seen_source_ids = set()
@@ -628,8 +638,39 @@ def process_query_langchain(request: QueryRequest):
     try:
         logger.info(f"Processing LangChain query: {request.query}")
         
+        query_embedding = vector_to_list(embedding_model.encode(request.query))
+
+        attachment_chunks = build_ephemeral_attachment_chunks(
+            query_embedding,
+            request.attachments,
+        )
+
+        if attachment_chunks:
+            logger.info(
+                "LangChain flow including %s transient chunk(s) from attachments",
+                len(attachment_chunks),
+            )
+
         # Retrieve documents using LangChain-compatible retriever
-        documents = get_relevant_chunks_langchain(request.query, request.user_groups, limit=25, similarity_threshold=0.3)
+        documents = get_relevant_chunks_langchain(
+            request.query,
+            request.user_groups,
+            limit=25,
+            similarity_threshold=0.3,
+        )
+
+        if attachment_chunks:
+            documents = [
+                Document(
+                    page_content=chunk["text"],
+                    metadata={
+                        "source": chunk["source"],
+                        "similarity": chunk["similarity"],
+                        "doc_id": chunk["doc_id"],
+                    },
+                )
+                for chunk in attachment_chunks
+            ] + documents
         
         if not documents:
             # Fallback to a generic assistant answer without context
@@ -752,6 +793,130 @@ def chunk_text(text: str, chunk_size: int = 512, overlap: int = 50) -> List[str]
 
     chunks = [segment.strip() for segment in splitter.split_text(text) if segment.strip()]
     return chunks
+
+
+def _extract_attachment_text(filename: str, raw_bytes: bytes) -> str:
+    """Read attachment bytes and return normalized text content."""
+    suffix = Path(filename).suffix.lower()
+
+    if suffix in {".txt", ".md"}:
+        return normalize_text(raw_bytes.decode("utf-8", errors="ignore"))
+
+    if suffix == ".pdf":
+        try:
+            import PyPDF2
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="PDF support requires PyPDF2. Install with `pip install PyPDF2`.",
+            ) from exc
+        reader = PyPDF2.PdfReader(BytesIO(raw_bytes))
+        extracted = "".join(page.extract_text() or "" for page in reader.pages)
+        return normalize_text(extracted)
+
+    if suffix == ".docx":
+        try:
+            from docx import Document as DocxDocument
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="DOCX support requires python-docx. Install with `pip install python-docx`.",
+            ) from exc
+        document = DocxDocument(BytesIO(raw_bytes))
+        extracted = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        return normalize_text(extracted)
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"Unsupported attachment type: {suffix or 'unknown'}",
+    )
+
+
+def _cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
+    """Compute cosine similarity between two dense vectors."""
+    if not vec_a or not vec_b or len(vec_a) != len(vec_b):
+        return 0.0
+
+    dot_product = 0.0
+    norm_a = 0.0
+    norm_b = 0.0
+    for a, b in zip(vec_a, vec_b):
+        dot_product += a * b
+        norm_a += a * a
+        norm_b += b * b
+
+    if norm_a <= 0 or norm_b <= 0:
+        return 0.0
+
+    return dot_product / (math.sqrt(norm_a) * math.sqrt(norm_b))
+
+
+def build_ephemeral_attachment_chunks(
+    query_embedding: List[float],
+    attachments: List[AttachmentPayload],
+    chunk_limit: int = 8,
+) -> List[Dict[str, Union[str, float]]]:
+    """Convert transient attachments into ranked chunks for a single response."""
+    if not attachments:
+        return []
+
+    ranked_chunks: List[Dict[str, Union[str, float]]] = []
+
+    for attachment_index, attachment in enumerate(attachments, start=1):
+        raw_bytes = _decode_attachment_data(attachment.data)
+        try:
+            attachment_text = _extract_attachment_text(attachment.filename, raw_bytes)
+        except HTTPException:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error(
+                "Failed to extract text from attachment '%s': %s",
+                attachment.filename,
+                exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to read attachment '{attachment.filename}'",
+            ) from exc
+
+        if not attachment_text.strip():
+            logger.info(
+                "Skipping attachment '%s' because no readable text was found",
+                attachment.filename,
+            )
+            continue
+
+        chunks = chunk_text(
+            attachment_text,
+            chunk_size=settings.default_chunk_size,
+            overlap=settings.default_chunk_overlap,
+        )
+
+        if not chunks:
+            chunks = [attachment_text.strip()]
+
+        for chunk_index, chunk_body in enumerate(chunks, start=1):
+            chunk_header = (
+                f"[Attachment {attachment_index} - Chunk {chunk_index}/{len(chunks)}]"
+            )
+            contextual_chunk = f"{chunk_header}\n{chunk_body}"
+            embedding = vector_to_list(embedding_model.encode(contextual_chunk))
+            similarity = _cosine_similarity(query_embedding, embedding)
+
+            ranked_chunks.append(
+                {
+                    "doc_id": f"attachment-{attachment_index}-{chunk_index}",
+                    "text": contextual_chunk,
+                    "source": f"{attachment.filename} (attachment)",
+                    "similarity": similarity,
+                }
+            )
+
+    ranked_chunks.sort(key=lambda entry: entry.get("similarity", 0.0), reverse=True)
+    if chunk_limit > 0:
+        ranked_chunks = ranked_chunks[:chunk_limit]
+
+    return ranked_chunks
 
 
 @app.post("/upload", tags=["Upload"])
