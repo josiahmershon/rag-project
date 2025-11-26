@@ -68,6 +68,8 @@ embedding_model = None
 vllm_client = None
 langchain_llm = None
 
+MAX_RESPONSE_SOURCES = int(os.getenv("MAX_RESPONSE_SOURCES", "5"))
+
 _TEST_STUB_CHUNKS: List[Dict[str, Union[str, float]]] = [
     {
         "doc_id": "stub-doc-1",
@@ -252,6 +254,7 @@ Guidelines:
 - Help employees get accurate answers with a friendly professional tone.
 - The context will be provided as a numbered list of documents. Incorporate every relevant document; if multiple records refer to distinct items, mention each one explicitly.
 - Use the provided document context when it is relevant and cite sources.
+- Cite at most three sources. Only cite a source if you explicitly reference its information.
 - If the context does not answer the question, say so and provide a concise general response if you know it.
 - If you are unsure or lack knowledge, explicitly state that you do not know rather than guessing.
 - Never fabricate citations or details; avoid hallucinations.
@@ -480,6 +483,7 @@ def generate_response_with_vllm(query: str, context_chunks: List[Dict[str, Union
 Guidelines:
 - Help employees with accurate, concise answers in a friendly tone.
 - Prefer the provided context and cite sources when you use it.
+- Cite at most three sources. Only cite a source if you explicitly use it in your answer.
 - If the context does not contain the answer, say so and provide a careful general response if you know it.
 - If you are unsure or information is unavailable, admit it rather than guessing.
 - Never fabricate details or citations."""
@@ -570,18 +574,7 @@ def process_query_common(request: QueryRequest, limit: int = 3, similarity_thres
             chunks = attachment_chunks + chunks
 
         # convert chunks to DocumentSource format
-        sources = []
-        seen_source_ids = set()
-        for chunk in chunks:
-            doc_id = chunk.get("doc_id")
-            if doc_id and doc_id in seen_source_ids:
-                continue
-            if doc_id:
-                seen_source_ids.add(doc_id)
-            source_label = chunk["source"]
-            if doc_id:
-                source_label = f"{source_label} ({doc_id})"
-            sources.append(DocumentSource(text=chunk["text"], source=source_label, doc_id=doc_id))
+        sources = select_response_sources(chunks)
         
         # generate response using vLLM
         llm_response = generate_response_with_vllm(request.query, chunks)
@@ -724,18 +717,8 @@ def process_query_langchain(request: QueryRequest):
         response_text = sanitize_model_output(response_text)
         
         # Convert documents to DocumentSource format
-        sources = []
-        seen_source_ids = set()
-        for doc in documents:
-            doc_id = doc.metadata.get("doc_id")
-            if doc_id and doc_id in seen_source_ids:
-                continue
-            if doc_id:
-                seen_source_ids.add(doc_id)
-            source_label = doc.metadata["source"]
-            if doc_id:
-                source_label = f"{source_label} ({doc_id})"
-            sources.append(DocumentSource(text=doc.page_content, source=source_label, doc_id=doc_id))
+        source_chunks = documents_to_chunks(documents)
+        sources = select_response_sources(source_chunks)
         
         logger.info(f"Returning LangChain response with {len(sources)} sources")
         return {"response": response_text, "sources": sources}
@@ -917,6 +900,82 @@ def build_ephemeral_attachment_chunks(
         ranked_chunks = ranked_chunks[:chunk_limit]
 
     return ranked_chunks
+
+
+def _chunk_is_attachment(chunk: Dict[str, Union[str, float]]) -> bool:
+    doc_id = chunk.get("doc_id")
+    return isinstance(doc_id, str) and doc_id.startswith("attachment-")
+
+
+def _format_document_source(chunk: Dict[str, Union[str, float]]) -> DocumentSource:
+    doc_id = chunk.get("doc_id")
+    source_label = chunk.get("source", "unknown")
+    if doc_id:
+        source_label = f"{source_label} ({doc_id})"
+    return DocumentSource(
+        text=chunk.get("text", ""),
+        source=source_label,
+        doc_id=doc_id,
+    )
+
+
+def select_response_sources(
+    chunks: List[Dict[str, Union[str, float]]],
+    max_non_attachment_sources: int = MAX_RESPONSE_SOURCES,
+) -> List[DocumentSource]:
+    """
+    Build a compact source list prioritizing attachments and the highest-similarity chunks.
+    """
+    if not chunks:
+        return []
+
+    attachments: List[Dict[str, Union[str, float]]] = []
+    others: List[Dict[str, Union[str, float]]] = []
+    seen_ids: set[str] = set()
+
+    for chunk in chunks:
+        doc_id = chunk.get("doc_id")
+        if doc_id and doc_id in seen_ids:
+            continue
+        if isinstance(doc_id, str):
+            seen_ids.add(doc_id)
+
+        if _chunk_is_attachment(chunk):
+            attachments.append(chunk)
+        else:
+            others.append(chunk)
+
+    attachments.sort(key=lambda entry: entry.get("similarity", 0.0), reverse=True)
+    others.sort(key=lambda entry: entry.get("similarity", 0.0), reverse=True)
+
+    selected_chunks: List[Dict[str, Union[str, float]]] = []
+    selected_chunks.extend(attachments)
+
+    if max_non_attachment_sources > 0:
+        remaining = max_non_attachment_sources
+        for chunk in others:
+            if remaining <= 0:
+                break
+            selected_chunks.append(chunk)
+            remaining -= 1
+
+    return [_format_document_source(chunk) for chunk in selected_chunks]
+
+
+def documents_to_chunks(documents: List[Document]) -> List[Dict[str, Union[str, float]]]:
+    """Convert LangChain Document objects to the chunk dict format."""
+    chunk_dicts: List[Dict[str, Union[str, float]]] = []
+    for doc in documents:
+        metadata = getattr(doc, "metadata", {}) or {}
+        chunk_dicts.append(
+            {
+                "doc_id": metadata.get("doc_id"),
+                "text": doc.page_content,
+                "source": metadata.get("source", "unknown"),
+                "similarity": metadata.get("similarity", 0.0),
+            }
+        )
+    return chunk_dicts
 
 
 @app.post("/upload", tags=["Upload"])
