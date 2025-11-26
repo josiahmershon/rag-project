@@ -1,4 +1,8 @@
+import base64
+import mimetypes
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 import chainlit as cl
 import httpx
@@ -9,6 +13,7 @@ load_dotenv()
 API_URL = os.getenv("BACKEND_API_URL", "http://localhost:8001")
 DEFAULT_ENDPOINT = os.getenv("BACKEND_ENDPOINT", "/query-lc")
 DEFAULT_USER_GROUPS = os.getenv("DEFAULT_USER_GROUPS", "sales")
+ALLOWED_ATTACHMENT_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 
 
 def parse_user_groups(groups_str: str):
@@ -48,6 +53,41 @@ async def on_message(message: cl.Message):
     user_groups = parse_user_groups(DEFAULT_USER_GROUPS)
     last_turn = cl.user_session.get("last_turn") or {}
 
+    attachments = []
+    rejected_files = []
+    for element in message.elements or []:
+        if not isinstance(element, cl.File):
+            continue
+        extension = Path(element.name or "").suffix.lower()
+        if extension not in ALLOWED_ATTACHMENT_EXTENSIONS:
+            rejected_files.append(element.name or "unknown file")
+            continue
+        try:
+            file_path = Path(element.path)
+            data = base64.b64encode(file_path.read_bytes()).decode("utf-8")
+        except Exception as exc:  # pragma: no cover - interactive UI safeguard
+            await cl.Message(
+                content=(
+                    f"Could not read attachment '{element.name}': {exc}. "
+                    "Please try again."
+                )
+            ).send()
+            return
+        mime_type = element.mime or mimetypes.guess_type(element.name or "")[0]
+        attachments.append(
+            {"filename": element.name or file_path.name, "mime_type": mime_type, "data": data}
+        )
+
+    if rejected_files:
+        await cl.Message(
+            content=(
+                "Unsupported attachment type(s): "
+                + ", ".join(rejected_files)
+                + ". Allowed types: PDF, DOCX, TXT, MD."
+            )
+        ).send()
+        return
+
     previous_user = (last_turn.get("user") or "").strip()
     previous_answer = (last_turn.get("assistant") or "").strip()
 
@@ -63,7 +103,12 @@ async def on_message(message: cl.Message):
     else:
         effective_query = query
 
-    payload = {"query": effective_query, "user_groups": user_groups}
+    payload = {
+        "query": effective_query,
+        "user_groups": user_groups,
+    }
+    if attachments:
+        payload["attachments"] = attachments
     url = f"{API_URL}{DEFAULT_ENDPOINT}"
 
     try:

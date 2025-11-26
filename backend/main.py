@@ -1,4 +1,5 @@
 # MAIN.PY
+import base64
 import html
 import os
 import re
@@ -15,7 +16,7 @@ from fastapi import File, Form, HTTPException, UploadFile, status
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from openai import OpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 
 # LangChain imports
@@ -38,9 +39,16 @@ from backend.utils import normalize_text, vector_to_list
 logger = get_logger(__name__)
 
 # define the structure of the incoming request json
+class AttachmentPayload(BaseModel):
+    filename: str
+    data: str
+    mime_type: Optional[str] = None
+
+
 class QueryRequest(BaseModel):
     query: str
     user_groups: List[str]
+    attachments: List[AttachmentPayload] = Field(default_factory=list)
 
 # define the structure for a single source document
 class DocumentSource(BaseModel):
@@ -66,6 +74,17 @@ _TEST_STUB_CHUNKS: List[Dict[str, Union[str, float]]] = [
         "similarity": 0.99,
     }
 ]
+def _decode_attachment_data(encoded: str) -> bytes:
+    """Decode base64 attachment data, enforcing strict validation."""
+    try:
+        return base64.b64decode(encoded, validate=True)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Attachment payload must be valid base64 data",
+        ) from exc
+
+
 def validate_query_request(request: QueryRequest) -> None:
     """Validate query request parameters."""
     if not request.query or len(request.query.strip()) < 3:
@@ -83,6 +102,33 @@ def validate_query_request(request: QueryRequest) -> None:
             status_code=status.HTTP_400_BAD_REQUEST, 
             detail="At least one user group required"
         )
+
+    allowed_extensions = {".pdf", ".docx", ".txt", ".md"}
+    for attachment in request.attachments or []:
+        extension = Path(attachment.filename).suffix.lower()
+        if extension not in allowed_extensions:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Unsupported attachment type for '{attachment.filename}'. "
+                    "Allowed types: PDF, DOCX, TXT, MD"
+                ),
+            )
+
+        raw_bytes = _decode_attachment_data(attachment.data)
+        if not raw_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Attachment '{attachment.filename}' is empty",
+            )
+        if len(raw_bytes) > settings.max_file_size:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Attachment '{attachment.filename}' exceeds size limit "
+                    f"({settings.max_file_size // (1024 * 1024)}MB)"
+                ),
+            )
 
 def validate_upload_file(file: UploadFile) -> None:
     """Validate uploaded file."""
@@ -497,7 +543,14 @@ def process_query_common(request: QueryRequest, limit: int = 3, similarity_thres
     try:
         # Validate request
         validate_query_request(request)
-        
+
+        if request.attachments:
+            logger.info(
+                "Received %s transient attachment(s): %s",
+                len(request.attachments),
+                ", ".join(att.filename for att in request.attachments),
+            )
+
         # embed the user's query using embedding model
         logger.info(f"Processing query: {request.query}")
         query_embedding = vector_to_list(embedding_model.encode(request.query))
