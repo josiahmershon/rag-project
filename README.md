@@ -40,7 +40,6 @@ Docker notes:
 ## Roadmap & Future Ideas
 
 ### Immediate Priorities (Stability)
-- **Fix Blocking I/O**: The current `upload_document` endpoint blocks the server. Need to switch to `asyncpg` or run DB calls in a thread pool.
 - **Authentication**: Add proper user authentication (OAuth2/OIDC) instead of relying on client-provided groups.
 - **Secrets Management**: Move all credentials to environment variables and remove defaults from code.
 
@@ -48,8 +47,13 @@ Docker notes:
 - **Hybrid Search**: Implement keyword search (BM25) alongside vector search for better precision on specific terms.
 - **Reranking**: Add a cross-encoder reranking step to improve result relevance.
 - **Chat History**: Persist user conversations in the database.
+- **Logging polish**: Standardize log formats/levels and surface key events (uploads, chats, errors).
 
 ### Completed / In Progress
+- [x] Frontend accepts transient attachments (Chainlit UI)
+- [x] Backend ingests attachments per turn without persisting to DB
+- [x] Source citations limited to top relevant documents
 - [x] Sales pilot ingestion (CLI implemented)
 - [x] User group filtering (SQL implementation active)
-- [ ] General polish (Logging needs improvement)
+- [ ] Async upload pipeline (replace blocking DB writes)
+- [ ] Chat history persistence / UX
