@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Literal
 
 import psycopg2.pool
 from fastapi import File, Form, HTTPException, UploadFile, status
@@ -47,10 +47,16 @@ class AttachmentPayload(BaseModel):
     mime_type: Optional[str] = None
 
 
+class ChatHistoryEntry(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class QueryRequest(BaseModel):
     query: str
     user_groups: List[str]
     attachments: List[AttachmentPayload] = Field(default_factory=list)
+    history: List[ChatHistoryEntry] = Field(default_factory=list)
 
 # define the structure for a single source document
 class DocumentSource(BaseModel):
@@ -69,6 +75,7 @@ vllm_client = None
 langchain_llm = None
 
 MAX_RESPONSE_SOURCES = int(os.getenv("MAX_RESPONSE_SOURCES", "5"))
+MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "30"))
 
 _TEST_STUB_CHUNKS: List[Dict[str, Union[str, float]]] = [
     {
@@ -133,6 +140,20 @@ def validate_query_request(request: QueryRequest) -> None:
                     f"({settings.max_file_size // (1024 * 1024)}MB)"
                 ),
             )
+
+    history_entries = request.history or []
+    if history_entries:
+        if len(history_entries) > MAX_HISTORY_MESSAGES:
+            history_entries = history_entries[-MAX_HISTORY_MESSAGES:]
+        cleaned_history: List[ChatHistoryEntry] = []
+        for entry in history_entries:
+            content = (entry.content or "").strip()
+            if not content:
+                continue
+            cleaned_history.append(ChatHistoryEntry(role=entry.role, content=content))
+        request.history = cleaned_history
+    else:
+        request.history = []
 
 def validate_upload_file(file: UploadFile) -> None:
     """Validate uploaded file."""
@@ -259,12 +280,15 @@ Guidelines:
 - If you are unsure or lack knowledge, explicitly state that you do not know rather than guessing.
 - Never fabricate citations or details; avoid hallucinations.
 - Do not reveal internal reasoning or chain-of-thought—share only the final answer and brief citations when used."""),
-    ("user", """Context from company documents:
+    ("user", """Conversation so far:
+{history}
+
+Context from company documents:
 {context}
 
 Question: {question}
 
-Please provide a helpful answer based on the context above.""")
+Please provide a helpful answer based on the conversation and context above.""")
 ])
 
 from backend.utils import normalize_text
@@ -457,7 +481,11 @@ def get_relevant_chunks(query_embedding: List[float], user_groups: List[str], li
         return []
 
 
-def generate_response_with_vllm(query: str, context_chunks: List[Dict[str, Union[str, float]]]) -> str:
+def generate_response_with_vllm(
+    query: str,
+    context_chunks: List[Dict[str, Union[str, float]]],
+    history: Optional[List[ChatHistoryEntry]] = None,
+) -> str:
     """
     Generate a response using vLLM based on the query and retrieved context chunks.
     """
@@ -465,6 +493,8 @@ def generate_response_with_vllm(query: str, context_chunks: List[Dict[str, Union
         return "Stub response generated during test mode."
 
     try:
+        history_messages = history_to_messages(history or [])
+
         # prepare context from retrieved chunks
         if not context_chunks:
             context = "No relevant documents found."
@@ -500,12 +530,12 @@ Please provide a helpful answer based on the context above."""
         request_id = str(uuid.uuid4())[:8]
         logger.info(f"[{request_id}] Making vLLM request for query: {query[:50]}...")
         start_time = time.time()
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history_messages)
+        messages.append({"role": "user", "content": user_message})
         response = vllm_client.chat.completions.create(
             model=settings.vllm_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message}
-            ],
+            messages=messages,
             temperature=0.7,
             max_tokens=1000,
             top_p=0.9
@@ -550,6 +580,13 @@ def process_query_common(request: QueryRequest, limit: int = 3, similarity_thres
         # Validate request
         validate_query_request(request)
 
+        history_entries = request.history or []
+        if history_entries:
+            logger.info(
+                "Including %s prior message(s) of conversation history",
+                len(history_entries),
+            )
+
         if request.attachments:
             logger.info(
                 "Received %s transient attachment(s): %s",
@@ -577,7 +614,11 @@ def process_query_common(request: QueryRequest, limit: int = 3, similarity_thres
         sources = select_response_sources(chunks)
         
         # generate response using vLLM
-        llm_response = generate_response_with_vllm(request.query, chunks)
+        llm_response = generate_response_with_vllm(
+            request.query,
+            chunks,
+            history_entries,
+        )
         llm_response = sanitize_model_output(llm_response)
         
         logger.info(f"Returning response with {len(sources)} sources")
@@ -630,7 +671,14 @@ def process_query_langchain(request: QueryRequest):
 
     try:
         logger.info(f"Processing LangChain query: {request.query}")
-        
+
+        history_entries = request.history or []
+        history_text = format_history_for_prompt(history_entries)
+        if history_entries:
+            logger.info(
+                "LangChain flow including %s prior message(s)",
+                len(history_entries),
+            )
         query_embedding = vector_to_list(embedding_model.encode(request.query))
 
         attachment_chunks = build_ephemeral_attachment_chunks(
@@ -671,8 +719,13 @@ def process_query_langchain(request: QueryRequest):
             try:
                 raw = langchain_llm.invoke(
                     "You are Scoop, the internal AI assistant for Blue Bell Creameries.\n\n"
-                    "Provide accurate, concise answers. If you lack information, say so instead of guessing.\n\n"
-                    f"Question: {request.query}\n\nAnswer helpfully."
+                    "Provide accurate, concise answers. If you lack information, say so instead of guessing."
+                    + (
+                        f"\n\nConversation so far:\n{history_text}"
+                        if history_entries
+                        else ""
+                    )
+                    + f"\n\nQuestion: {request.query}\n\nAnswer helpfully."
                 )
                 # Extract text if ChatMessage
                 if hasattr(raw, "content"):
@@ -695,8 +748,9 @@ def process_query_langchain(request: QueryRequest):
         # Create the LangChain chain
         chain = (
             RunnableParallel({
-                "context": lambda x: context,
-                "question": RunnablePassthrough()
+                "context": lambda _: context,
+                "question": RunnablePassthrough(),
+                "history": lambda _: history_text,
             })
             | RAG_PROMPT
             | langchain_llm
@@ -708,7 +762,7 @@ def process_query_langchain(request: QueryRequest):
         logger.info(f"[{request_id}] Invoking LangChain chain...")
         start_time = time.time()
         
-        response_text = chain.invoke({"question": request.query})
+        response_text = chain.invoke(request.query)
         
         response_time = time.time() - start_time
         logger.info(f"[{request_id}] LangChain response generated in {response_time:.2f}s")
@@ -900,6 +954,22 @@ def build_ephemeral_attachment_chunks(
         ranked_chunks = ranked_chunks[:chunk_limit]
 
     return ranked_chunks
+
+
+def history_to_messages(history: List[ChatHistoryEntry]) -> List[Dict[str, str]]:
+    """Convert history entries to OpenAI-style chat messages."""
+    return [{"role": entry.role, "content": entry.content} for entry in history]
+
+
+def format_history_for_prompt(history: List[ChatHistoryEntry]) -> str:
+    """Serialize chat history into plain text for prompt templates."""
+    if not history:
+        return "None."
+    lines: List[str] = []
+    for entry in history:
+        speaker = "User" if entry.role == "user" else "Assistant"
+        lines.append(f"{speaker}: {entry.content}")
+    return "\n".join(lines)
 
 
 def _chunk_is_attachment(chunk: Dict[str, Union[str, float]]) -> bool:

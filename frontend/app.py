@@ -14,6 +14,7 @@ API_URL = os.getenv("BACKEND_API_URL", "http://localhost:8001")
 DEFAULT_ENDPOINT = os.getenv("BACKEND_ENDPOINT", "/query-lc")
 DEFAULT_USER_GROUPS = os.getenv("DEFAULT_USER_GROUPS", "sales")
 ALLOWED_ATTACHMENT_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
+MAX_HISTORY_ENTRIES = int(os.getenv("MAX_HISTORY_ENTRIES", "40"))
 
 
 def parse_user_groups(groups_str: str):
@@ -34,7 +35,7 @@ def get_groups():
 
 @cl.on_chat_start
 async def start():
-    cl.user_session.set("last_turn", None)
+    cl.user_session.set("conversation", [])
     await cl.Message(
         content=(
             f"Connected to backend: {API_URL}{DEFAULT_ENDPOINT}\n\n"
@@ -51,7 +52,7 @@ async def on_message(message: cl.Message):
         return
 
     user_groups = parse_user_groups(DEFAULT_USER_GROUPS)
-    last_turn = cl.user_session.get("last_turn") or {}
+    conversation = cl.user_session.get("conversation") or []
 
     attachments = []
     rejected_files = []
@@ -88,25 +89,13 @@ async def on_message(message: cl.Message):
         ).send()
         return
 
-    previous_user = (last_turn.get("user") or "").strip()
-    previous_answer = (last_turn.get("assistant") or "").strip()
-
-    if previous_user or previous_answer:
-        context_parts = ["Previous exchange:"]
-        if previous_user:
-            context_parts.append(f"User: {previous_user}")
-        if previous_answer:
-            context_parts.append(f"Assistant: {previous_answer}")
-        context_parts.append("")
-        context_parts.append(f"Follow-up question: {query}")
-        effective_query = "\n".join(context_parts)
-    else:
-        effective_query = query
-
     payload = {
-        "query": effective_query,
+        "query": query,
         "user_groups": user_groups,
     }
+    if conversation:
+        history_payload = conversation[-MAX_HISTORY_ENTRIES:]
+        payload["history"] = history_payload
     if attachments:
         payload["attachments"] = attachments
     url = f"{API_URL}{DEFAULT_ENDPOINT}"
@@ -138,6 +127,10 @@ async def on_message(message: cl.Message):
 
     await cl.Message(content=content).send()
 
-    cl.user_session.set("last_turn", {"user": query, "assistant": answer})
+    conversation.append({"role": "user", "content": query})
+    conversation.append({"role": "assistant", "content": answer})
+    if len(conversation) > MAX_HISTORY_ENTRIES:
+        conversation = conversation[-MAX_HISTORY_ENTRIES:]
+    cl.user_session.set("conversation", conversation)
 
 
