@@ -620,6 +620,8 @@ def process_query_common(request: QueryRequest, limit: int = 3, similarity_thres
             history_entries,
         )
         llm_response = sanitize_model_output(llm_response)
+
+        sources = filter_sources_by_response(llm_response, sources)
         
         logger.info(f"Returning response with {len(sources)} sources")
         return {"response": llm_response, "sources": sources}
@@ -1046,6 +1048,46 @@ def documents_to_chunks(documents: List[Document]) -> List[Dict[str, Union[str, 
             }
         )
     return chunk_dicts
+
+
+def filter_sources_by_response(
+    response_text: str,
+    sources: List[DocumentSource],
+) -> List[DocumentSource]:
+    """
+    Keep only sources explicitly referenced in the response text.
+    Attachment sources are always preserved.
+    """
+    if not response_text or not sources:
+        return sources
+
+    lowered = response_text.lower()
+    filtered: List[DocumentSource] = []
+
+    for source in sources:
+        label = (source.source or "").strip()
+        if not label:
+            continue
+
+        # Always keep attachment sources
+        if "attachment" in label.lower():
+            filtered.append(source)
+            continue
+
+        # If the label (without doc_id suffix) is present, keep it
+        label_main = label
+        if "(" in label_main:
+            label_main = label_main.split("(")[0].strip()
+
+        if label_main and label_main.lower() in lowered:
+            filtered.append(source)
+            continue
+
+        # If doc_id exists and is referenced, keep it
+        if source.doc_id and source.doc_id.lower() in lowered:
+            filtered.append(source)
+
+    return filtered or sources[:1]
 
 
 @app.post("/upload", tags=["Upload"])
