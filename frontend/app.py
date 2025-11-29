@@ -15,6 +15,7 @@ DEFAULT_ENDPOINT = os.getenv("BACKEND_ENDPOINT", "/query-lc")
 DEFAULT_USER_GROUPS = os.getenv("DEFAULT_USER_GROUPS", "sales")
 ALLOWED_ATTACHMENT_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 MAX_HISTORY_ENTRIES = int(os.getenv("MAX_HISTORY_ENTRIES", "40"))
+MAX_HISTORY_DISPLAY = int(os.getenv("MAX_HISTORY_DISPLAY", "30"))
 
 
 def parse_user_groups(groups_str: str):
@@ -36,6 +37,7 @@ def get_groups():
 @cl.on_chat_start
 async def start():
     cl.user_session.set("conversation", [])
+    cl.user_session.set("attachments", [])
     await cl.Message(
         content=(
             f"Connected to backend: {API_URL}{DEFAULT_ENDPOINT}\n\n"
@@ -75,8 +77,9 @@ async def on_message(message: cl.Message):
             ).send()
             return
         mime_type = element.mime or mimetypes.guess_type(element.name or "")[0]
+        stored_name = element.name or file_path.name
         attachments.append(
-            {"filename": element.name or file_path.name, "mime_type": mime_type, "data": data}
+            {"filename": stored_name, "mime_type": mime_type, "data": data}
         )
 
     if rejected_files:
@@ -88,6 +91,11 @@ async def on_message(message: cl.Message):
             )
         ).send()
         return
+
+    session_attachments = cl.user_session.get("attachments") or []
+    if attachments:
+        session_attachments.extend([att["filename"] for att in attachments])
+        cl.user_session.set("attachments", session_attachments[-10:])
 
     payload = {
         "query": query,
@@ -132,5 +140,18 @@ async def on_message(message: cl.Message):
     if len(conversation) > MAX_HISTORY_ENTRIES:
         conversation = conversation[-MAX_HISTORY_ENTRIES:]
     cl.user_session.set("conversation", conversation)
+
+    if attachments:
+        attachment_list = "\n".join(f"- {name}" for name in session_attachments[-10:])
+        await cl.Message(
+            content=f"Attachments uploaded this session:\n{attachment_list}"
+        ).send()
+
+    if len(conversation) >= MAX_HISTORY_DISPLAY:
+        await cl.Message(
+            content=(
+                f"(History auto-trimmed to the {MAX_HISTORY_DISPLAY} most recent turns.)"
+            )
+        ).send()
 
 
