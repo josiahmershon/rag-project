@@ -1,19 +1,16 @@
 Configuration
 =============
 
-The Chainlit app will read a local `.env` file if present. You can customize:
+Copy `env.example` to `.env` to get a default configuration, then tweak as needed:
 
 ```
-# .env
-BACKEND_API_URL=http://localhost:8001
-BACKEND_ENDPOINT=/query-lc
-DEFAULT_USER_GROUPS=executives,engineering
+cp frontend/env.example frontend/.env
 ```
 
-If `.env` is absent, defaults are used:
-- BACKEND_API_URL: http://localhost:8001
-- BACKEND_ENDPOINT: /query-lc
-- DEFAULT_USER_GROUPS: executives,engineering
+Key options:
+- `BACKEND_API_URL`, `BACKEND_ENDPOINT`, `DEFAULT_USER_GROUPS`
+- History controls: `MAX_HISTORY_ENTRIES`, `MAX_HISTORY_DISPLAY`
+- Attachment allowlist: `ALLOWED_ATTACHMENT_EXTENSIONS`
 
 Run
 ---
@@ -39,7 +36,10 @@ chainlit run app.py --host 0.0.0.0 --port 8002 -w
 chainlit run frontend/app.py -w
 ```
 
-Then open the provided local URL. Type a question; results will include a compact sources list.
+Then open the provided local URL. Type a question; the UI will:
+- retain the current chat history (up to 40 turns) and send it along with every request
+- accept attachments (PDF, DOCX, TXT, MD) for the current turn only; uploads are echoed back in the chat
+- show a compact sources list limited to citations that appear in the assistant’s response
 
 ### Notes
 - Keep `DEFAULT_USER_GROUPS` as a placeholder until LDAP/AD is wired in.

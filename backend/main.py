@@ -7,7 +7,7 @@ import re
 import tempfile
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -293,102 +293,103 @@ Please provide a helpful answer based on the conversation and context above.""")
 
 from backend.utils import normalize_text
 
+db_pool = None
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """FastAPI lifespan context to initialise and tear down resources."""
+    global embedding_model, db_pool, vllm_client, langchain_llm
+
+    try:
+        if settings.test_mode:
+            logger.info("Test mode detected; installing lightweight stubs")
+
+            class _StubEmbeddingModel:
+                def encode(self, value: Union[str, List[str]]) -> List[float]:
+                    if isinstance(value, list):
+                        return [float(len(" ".join(value)) or 1.0)]
+                    if not isinstance(value, str):
+                        return [0.0]
+                    return [float(len(value) or 1.0)]
+
+            embedding_model = _StubEmbeddingModel()
+
+            def _stub_completion_create(*args, **kwargs):
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content="Stub response generated during test mode."
+                            )
+                        )
+                    ]
+                )
+
+            vllm_client = SimpleNamespace(
+                chat=SimpleNamespace(
+                    completions=SimpleNamespace(create=_stub_completion_create)
+                )
+            )
+            langchain_llm = SimpleNamespace(
+                invoke=lambda *args, **kwargs: "Stub response generated during test mode."
+            )
+            db_pool = None
+        else:
+            logger.info("Loading embedding model...")
+            embedding_model = SentenceTransformer(settings.embedding_model_name)
+            logger.info("Embedding model loaded successfully")
+
+            logger.info("Initializing database connection pool...")
+            db_pool = psycopg2.pool.SimpleConnectionPool(
+                minconn=1,
+                maxconn=20,
+                host=settings.db_host,
+                database=settings.db_name,
+                user=settings.db_user,
+                password=settings.db_password.get_secret_value(),
+            )
+            logger.info("Database connection pool initialized successfully")
+
+            logger.info("Initializing vLLM client...")
+            vllm_client = OpenAI(
+                base_url=settings.vllm_base_url,
+                api_key=settings.vllm_api_key.get_secret_value()
+                if settings.vllm_api_key
+                else "dummy-key",
+            )
+            logger.info("vLLM client initialized successfully")
+
+            logger.info("Initializing LangChain ChatOpenAI client...")
+            langchain_llm = ChatOpenAI(
+                base_url=settings.vllm_base_url,
+                api_key=settings.vllm_api_key.get_secret_value()
+                if settings.vllm_api_key
+                else "dummy-key",
+                model=settings.vllm_model,
+                temperature=0.7,
+                max_tokens=1000,
+            )
+            logger.info("LangChain ChatOpenAI client initialized successfully")
+
+        yield
+
+    finally:
+        try:
+            if db_pool is not None:
+                db_pool.closeall()
+                logger.info("Database connection pool closed")
+        except Exception as e:
+            logger.warning(f"Error closing DB pool: {e}")
+
+
 # create the FastAPI application
 app = FastAPI(
     title="AI Assistant API",
     description="API for the AI assistant.",
     version="0.1.0",
+    lifespan=lifespan,
 )
-
-# Database connection pool (initialized on startup)
-db_pool = None
-
-@app.on_event("startup")
-def on_startup() -> None:
-    """Initialize heavy resources: embeddings model, DB pool, LLM clients."""
-    global embedding_model, db_pool, vllm_client, langchain_llm
-    if settings.test_mode:
-        logger.info("Test mode detected; installing lightweight stubs")
-
-        # Minimal embedding model for deterministic behaviour in tests
-        class _StubEmbeddingModel:
-            def encode(self, value: Union[str, List[str]]) -> List[float]:
-                if isinstance(value, list):
-                    return [float(len(" ".join(value)) or 1.0)]
-                if not isinstance(value, str):
-                    return [0.0]
-                return [float(len(value) or 1.0)]
-
-        embedding_model = _StubEmbeddingModel()
-
-        def _stub_completion_create(*args, **kwargs):
-            return SimpleNamespace(
-                choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(
-                            content="Stub response generated during test mode."
-                        )
-                    )
-                ]
-            )
-
-        vllm_client = SimpleNamespace(
-            chat=SimpleNamespace(
-                completions=SimpleNamespace(create=_stub_completion_create)
-            )
-        )
-        langchain_llm = SimpleNamespace(
-            invoke=lambda *args, **kwargs: "Stub response generated during test mode."
-        )
-        db_pool = None
-        return
-
-    logger.info("Loading embedding model...")
-    embedding_model = SentenceTransformer(settings.embedding_model_name)
-    logger.info("Embedding model loaded successfully")
-
-    logger.info("Initializing database connection pool...")
-    db_pool = psycopg2.pool.SimpleConnectionPool(
-        minconn=1,
-        maxconn=20,
-        host=settings.db_host,
-        database=settings.db_name,
-        user=settings.db_user,
-        password=settings.db_password.get_secret_value(),
-    )
-    logger.info("Database connection pool initialized successfully")
-
-    logger.info("Initializing vLLM client...")
-    vllm_client = OpenAI(
-        base_url=settings.vllm_base_url,
-        api_key=settings.vllm_api_key.get_secret_value()
-        if settings.vllm_api_key
-        else "dummy-key",
-    )
-    logger.info("vLLM client initialized successfully")
-
-    logger.info("Initializing LangChain ChatOpenAI client...")
-    langchain_llm = ChatOpenAI(
-        base_url=settings.vllm_base_url,
-        api_key=settings.vllm_api_key.get_secret_value()
-        if settings.vllm_api_key
-        else "dummy-key",
-        model=settings.vllm_model,
-        temperature=0.7,
-        max_tokens=1000,
-    )
-    logger.info("LangChain ChatOpenAI client initialized successfully")
-
-@app.on_event("shutdown")
-def on_shutdown() -> None:
-    """Tear down heavy resources cleanly."""
-    global db_pool
-    try:
-        if db_pool is not None:
-            db_pool.closeall()
-            logger.info("Database connection pool closed")
-    except Exception as e:
-        logger.warning(f"Error closing DB pool: {e}")
 
 @contextmanager
 def get_db_connection():
